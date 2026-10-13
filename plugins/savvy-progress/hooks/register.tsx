@@ -1,7 +1,19 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type {
+  AgentRun,
+  Flow,
+  Panel,
+  Phase,
+  PlannedTask,
+  SavvyActArgs,
+  SavvyActResult,
+  SavvyItem,
+  SavvyLang,
+  SavvyPanel,
+  SavvyPanelArgs,
+} from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -66,8 +78,6 @@ const STRINGS = {
     isRunning: 'running',
     isFinished: 'finished',
     isPlanned: 'planned',
-    opened: 'Agents panel opened.',
-    closed: 'Agents panel closed.',
     done: 'Done',
     plan: 'Plan',
     design: 'Design',
@@ -97,8 +107,6 @@ const STRINGS = {
     isRunning: 'работает',
     isFinished: 'завершён',
     isPlanned: 'запланирована',
-    opened: 'Панель агентов открыта.',
-    closed: 'Панель агентов закрыта.',
     done: 'Готово',
     plan: 'План',
     design: 'Дизайн',
@@ -128,8 +136,6 @@ const STRINGS = {
     isRunning: 'פועל',
     isFinished: 'הסתיים',
     isPlanned: 'מתוכנן',
-    opened: 'חלונית הסוכנים נפתחה.',
-    closed: 'חלונית הסוכנים נסגרה.',
     done: 'הושלם',
     plan: 'תכנון',
     design: 'עיצוב',
@@ -777,10 +783,15 @@ async function togglePane($: EngineInterface): Promise<boolean> {
     await $.ui.close({ id: PANE })
     return false
   }
+  await openPane($)
+  return true
+}
+
+// Opens the agents pane, or brings it forward from behind another tab, without toggling it.
+async function openPane($: EngineInterface): Promise<void> {
   const at = await $.clock.now()
   await update($, now, () => at)
   await $.ui.open({ id: PANE, title: tr().pane })
-  return true
 }
 
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
@@ -788,6 +799,210 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   if (p.autoOpenedFor === key) return
   await update($, panel, prev => ({ ...prev, autoOpenedFor: key }))
   void $.ui.open({ id: PANE, title: tr().pane })
+}
+
+// ---------------------------------------------------------------------------
+// The /mods hub's tab (claude-mods-hub PROTOCOL.md): what the mod tracks, a button
+// that opens the agents pane, and the mod's two settings. It speaks the hub's
+// language (English or Portuguese), not the pane's.
+
+const HUB = {
+  en: {
+    title: 'Agents',
+    overview: 'Overview',
+    settings: 'Settings',
+    nRunning: (n: number) => `${n} running`,
+    nDone: (n: number) => `${n} done`,
+    nPlanned: (n: number) => `${n} planned`,
+    none: 'no agents this session',
+    running: 'Running',
+    finished: 'Finished',
+    failed: (n: number) => `${n} failed`,
+    planned: 'Planned',
+    flow: 'Flow',
+    cost: 'Estimated cost',
+    tokens: 'Tokens',
+    time: 'Time',
+    planning: 'planning',
+    design: 'design',
+    tasks: 'tasks',
+    review: 'review',
+    flowDone: 'done',
+    busy: 'running',
+    open: 'Open the agents panel',
+    openHelp: 'Running, finished and planned subagents with model, task progress, context, cost and time.',
+    opened: 'Agents panel opened.',
+    language: 'Panel language',
+    languageHelp: "The agents pane and the progress bar. Auto follows Claude Code's language, then the system locale.",
+    autoOpen: 'Open the panel by itself',
+    autoOpenHelp: 'When a savvy-flow worker starts or a plan is reported; with any subagent, also once per session when any other one starts.',
+    auto: 'Auto',
+    savvy: 'savvy-flow',
+    any: 'Any subagent',
+    set: (label: string, value: string) => `${label}: ${value}.`,
+    badValue: (value: string) => `Not an option: ${value}`,
+    unknown: (id: string) => `Unknown action: ${id}`,
+  },
+  pt: {
+    title: 'Agentes',
+    overview: 'Visão geral',
+    settings: 'Ajustes',
+    nRunning: (n: number) => `${n} em execução`,
+    nDone: (n: number) => `${n} ${n === 1 ? 'concluído' : 'concluídos'}`,
+    nPlanned: (n: number) => `${n} ${n === 1 ? 'planejado' : 'planejados'}`,
+    none: 'nenhum agente nesta sessão',
+    running: 'Em execução',
+    finished: 'Concluídos',
+    failed: (n: number) => `${n} com erro`,
+    planned: 'Planejados',
+    flow: 'Fluxo',
+    cost: 'Custo estimado',
+    tokens: 'Tokens',
+    time: 'Tempo',
+    planning: 'planejando',
+    design: 'design',
+    tasks: 'tarefas',
+    review: 'revisão',
+    flowDone: 'concluído',
+    busy: 'em execução',
+    open: 'Abrir o painel de agentes',
+    openHelp: 'Subagentes em execução, concluídos e planejados, com modelo, progresso da tarefa, contexto, custo e tempo.',
+    opened: 'Painel de agentes aberto.',
+    language: 'Idioma do painel',
+    languageHelp: 'O painel de agentes e a barra de progresso. Automático segue o idioma do Claude Code e depois o do sistema.',
+    autoOpen: 'Abrir o painel sozinho',
+    autoOpenHelp: 'Quando um worker do savvy-flow começa ou um plano é informado; com qualquer subagente, também uma vez por sessão quando outro começa.',
+    auto: 'Automático',
+    savvy: 'savvy-flow',
+    any: 'Qualquer subagente',
+    set: (label: string, value: string) => `${label}: ${value}.`,
+    badValue: (value: string) => `Opção inválida: ${value}`,
+    unknown: (id: string) => `Ação desconhecida: ${id}`,
+  },
+} as const
+
+type Hub = (typeof HUB)[SavvyLang]
+
+// A language the hub asks for that the mod does not speak is answered in English.
+const hubOf = (l: unknown): Hub => (l === 'pt' ? HUB.pt : HUB.en)
+
+// `act` carries no language: its message speaks the one the hub's last `panel` asked for.
+// Module scope is fine: the hub asks for a panel before it shows a button to press.
+let hubLang: SavvyLang = 'en'
+
+// The mod's userConfig fields the hub's Settings section changes, each a choice.
+const SETTINGS = {
+  language: { values: ['auto', 'en', 'ru', 'he'], fallback: 'auto' },
+  autoOpen: { values: ['savvy', 'any'], fallback: 'savvy' },
+} as const
+
+type Setting = keyof typeof SETTINGS
+
+const isSetting = (id: string): id is Setting => Object.hasOwn(SETTINGS, id)
+
+const settingLabel = (h: Hub, id: Setting): string => (id === 'language' ? h.language : h.autoOpen)
+
+const optionLabel = (h: Hub, value: string): string =>
+  ({ auto: h.auto, en: 'English', ru: 'Русский', he: 'עברית', savvy: h.savvy, any: h.any })[value] ?? value
+
+// The setting as stored now. The options `register` got are this activation's, and a
+// change reloads the module: the hub draws again before that, so read the config row.
+async function settingOf($: EngineInterface, options: PluginOptions, id: Setting): Promise<string> {
+  const { values, fallback } = SETTINGS[id]
+  const known = (v: unknown): v is string => typeof v === 'string' && (values as readonly string[]).includes(v)
+  try {
+    const row = (await $.config.list()).find(r => r.key === `savvy-progress.${id}`)
+    if (known(row?.value)) return row.value
+  } catch {
+    // No config menu here: the activation's options stand.
+  }
+  return known(options[id]) ? options[id] : fallback
+}
+
+// "tasks 1/4 · 25%", in the hub's language.
+const flowProgress = (h: Hub, f: Flow): string => {
+  if (f.isFinished) return h.flowDone
+  if (f.phase === 'plan') return h.planning
+  if (f.phase === 'design') return h.design
+  const word = f.phase === 'review' ? h.review : h.tasks
+  return f.total ? `${word} ${f.done}/${f.total} · ${Math.round(ratio(f) * 100)}%` : `${word}: ${f.running} ${h.busy}`
+}
+
+async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: PluginOptions): Promise<SavvyPanel> {
+  hubLang = args.lang === 'pt' ? 'pt' : 'en'
+  const h = hubOf(hubLang)
+  const list = await read($, agents)
+  const f = await read($, flow)
+  const at = Math.max(await $.clock.now(), ...list.map(a => a.startedAt), 0)
+  const running = list.filter(a => a.status === 'running').length
+  const finished = list.length - running
+  const failed = list.filter(a => a.status === 'failed').length
+  const planned = plannedOf(f, list).length
+  const t = totals(list, at)
+  const isFlowLive = f !== null && !f.isFinished
+
+  const counts = [running ? h.nRunning(running) : '', finished ? h.nDone(finished) : '', planned ? h.nPlanned(planned) : ''].filter(Boolean)
+  const summary = [isFlowLive ? `${f.title}: ${flowProgress(h, f)}` : '', counts.length ? counts.join(' · ') : h.none].filter(Boolean).join(' · ')
+
+  const overview: SavvyItem[] = [
+    { kind: 'info', label: h.running, value: String(running), tone: running ? 'accent' : 'muted' },
+    {
+      kind: 'info',
+      label: h.finished,
+      value: failed ? `${finished} (${h.failed(failed)})` : String(finished),
+      ...(failed ? { tone: 'warn' as const } : finished ? {} : { tone: 'muted' as const }),
+    },
+    { kind: 'info', label: h.planned, value: String(planned), ...(planned ? {} : { tone: 'muted' as const }) },
+  ]
+  if (f !== null) overview.push({ kind: 'info', label: h.flow, value: `${f.title}: ${flowProgress(h, f)}`, tone: f.isFinished ? 'ok' : 'accent' })
+  if (list.length) {
+    overview.push(
+      { kind: 'info', label: h.cost, value: `≈${fmtCost(t.cost)}` },
+      { kind: 'info', label: h.tokens, value: fmtTokens(t.tokens) },
+      { kind: 'info', label: h.time, value: fmtTime(t.time) },
+    )
+  }
+  overview.push({ kind: 'action', id: 'open', label: h.open, help: h.openHelp, primary: true })
+
+  const settings: SavvyItem[] = []
+  for (const id of Object.keys(SETTINGS) as Setting[]) {
+    settings.push({
+      kind: 'choice',
+      id,
+      label: settingLabel(h, id),
+      help: id === 'language' ? h.languageHelp : h.autoOpenHelp,
+      value: await settingOf($, options, id),
+      options: SETTINGS[id].values.map(value => ({ value, label: optionLabel(h, value) })),
+    })
+  }
+
+  return {
+    title: h.title,
+    summary,
+    ...(running ? { tone: 'accent' as const } : failed ? { tone: 'warn' as const } : {}),
+    sections: [
+      { id: 'overview', title: h.overview, items: overview },
+      { id: 'settings', title: h.settings, items: settings },
+    ],
+    // The counts and clocks move while agents run: the hub draws the tab again.
+    ...(running ? { refreshMs: 5000 } : {}),
+  }
+}
+
+async function actOn($: EngineInterface, args: SavvyActArgs): Promise<SavvyActResult> {
+  const h = hubOf(hubLang)
+  if (args.id === 'open') {
+    await openPane($)
+    return { message: h.opened }
+  }
+  if (!isSetting(args.id)) return { message: h.unknown(args.id) }
+  const value = args.value ?? ''
+  if (!(SETTINGS[args.id].values as readonly string[]).includes(value)) return { message: h.badValue(value) }
+  const written = await $.config.set({ key: `savvy-progress.${args.id}`, value })
+  if (written.deny !== undefined) return { message: written.deny }
+  // The pane and the band follow at once; the reload the change brings sets it again.
+  if (args.id === 'language') lang = await detectLang($, value)
+  return { message: h.set(settingLabel(h, args.id), optionLabel(h, value)) }
 }
 
 export const register: Register = (on, options) => {
@@ -844,10 +1059,6 @@ export const register: Register = (on, options) => {
       // In every agent's tool list, not behind ToolSearch: workers do not go looking for it.
       isDeferred: false,
     })
-    await $.command.register({
-      name: 'agents-info',
-      description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
-    })
 
     // Ticks the running agents' clocks; quiet when nothing runs.
     $.clock.every(1000, () => {
@@ -861,17 +1072,15 @@ export const register: Register = (on, options) => {
     return started
   })
 
-  on('command.run', { command: 'agents-info' }, async ($, e) => {
-    // `/agents-info open` opens the panel, or brings it forward from behind another tab, without toggling it.
-    if ((e.args ?? '').trim() === 'open') {
-      const at = await $.clock.now()
-      await update($, now, () => at)
-      await $.ui.open({ id: PANE, title: tr().pane })
-      return { text: tr().opened }
-    }
-    const isOpen = await togglePane($)
-    return { text: isOpen ? tr().opened : tr().closed }
+  // `$.savvy` for the /mods hub (claude-mods-hub PROTOCOL.md): a call is the
+  // `savvy.panel` or `savvy.act` event, answered below with this session's `$`;
+  // the stub is the chain's floor.
+  on('engine.create', async ($, e, next) => {
+    const built = await next(e)
+    return { ...built, savvy: { panel: async () => ({ title: '', sections: [] }), act: async () => ({}) } }
   })
+  on('savvy.panel', async ($, e) => ({ value: await panelOf($, e, options) }))
+  on('savvy.act', async ($, e) => ({ value: await actOn($, e) }))
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
     // The flow is the main session's: a call from a worker's loop carries its agentId

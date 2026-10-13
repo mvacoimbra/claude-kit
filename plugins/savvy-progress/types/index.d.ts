@@ -46,7 +46,43 @@ export type Panel = {
   autoOpenedFor: string
 }
 
+// What `$.savvy` hands the /mods hub (claude-mods-hub PROTOCOL.md): one tab, drawn by the hub.
+export type SavvyLang = 'en' | 'pt'
+export type SavvyPanelArgs = { lang: SavvyLang; surface: 'terminal' | 'desktop' | 'vscode' | 'mobile'; columns: number }
+export type SavvyTone = 'ok' | 'warn' | 'err' | 'muted' | 'accent'
+export type SavvyItem =
+  | { kind: 'toggle'; id: string; label: string; help?: string; value: boolean }
+  | { kind: 'choice'; id: string; label: string; help?: string; value: string; options: { value: string; label: string }[] }
+  | { kind: 'action'; id: string; label: string; help?: string; primary?: boolean }
+  | { kind: 'input'; id: string; label: string; help?: string; placeholder?: string; submitLabel?: string }
+  | { kind: 'info'; label: string; value: string; tone?: SavvyTone }
+  | { kind: 'text'; text: string; tone?: SavvyTone }
+  | { kind: 'swatch'; id: string; label: string; color: string; selected: boolean }
+  | { kind: 'tree'; tree: unknown }
+export type SavvySection = { id: string; title: string; items: SavvyItem[] }
+export type SavvyPanel = {
+  // The tab's name.
+  title: string
+  // One line for the overview and under the tab row.
+  summary?: string
+  tone?: SavvyTone
+  // Drawn as sub-tabs when there is more than one.
+  sections: SavvySection[]
+  // While this tab shows, the hub draws it again this often (a countdown).
+  refreshMs?: number
+}
+export type SavvyActArgs = { id: string; value?: string }
+export type SavvyActResult = { message?: string }
+
 declare module 'claude-code' {
+  // What savvy-progress adds to `$`: its tab in the /mods hub.
+  interface EngineInterface {
+    savvy: {
+      panel: (args: SavvyPanelArgs) => Promise<SavvyPanel>
+      act: (args: SavvyActArgs) => Promise<SavvyActResult>
+    }
+  }
+
   interface PluginState {
     'savvy-progress': {
       flow: Flow | null
