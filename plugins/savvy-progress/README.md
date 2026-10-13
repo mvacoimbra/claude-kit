@@ -12,6 +12,8 @@ The mod has no slash command of its own: it is a tab in the `/mods` panel of the
 - **Overview**: running, finished and planned agents, the current flow's progress, and the estimated cost, tokens and time so far, plus **Open the agents panel**, which opens the pane (or brings it forward). While agents run, the hub redraws the counts every 5 seconds.
 - **Settings**: the two options below, `language` and `autoOpen`, changed in place.
 
+Every component the mod draws (the band in each state, the agents pane, its rows, buttons and crabs) also shows, named and live, in the **Components** tab of `/mods`.
+
 ## Tools it adds
 
 - `mcp__savvy-progress__progress`: the orchestrator reports the plan, phase and accepted tasks. Only the main session can: a call from a subagent is ignored, so a worker cannot rename, finish or reset the flow.
