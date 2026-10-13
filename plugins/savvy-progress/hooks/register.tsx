@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register } from 'claude-code'
+import type { ButtonProps, ElementConstructor, ElementTable, EngineInterface, PluginOptions, Register, RenderElement, SvgProps } from 'claude-code'
 
 import type {
   AgentRun,
@@ -349,9 +349,12 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 <text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle"${rtl ? ' direction="rtl"' : ''} font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
 </g>
 <text class="m" ${percentAt} font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, rtl)}
+${CRAB_CSS}${bandCrab(rx(W - CRAB_W + 1, crabW), isWorking, rtl)}
 </svg>`
 }
+
+// The band's crab: plain, smaller than the panel's, walking while any agent runs.
+const bandCrab = (x: number, isWorking: boolean, rtl: boolean): string => crab(x, 0, 'other', false, isWorking, 0.8, rtl)
 
 const barText = (f: Flow, width: number): string => {
   const filled = Math.round(width * ratio(f))
@@ -699,31 +702,54 @@ const progressOf = (a: AgentRun): number | null => {
 
 const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round((a.contextTokens / a.contextMax) * 100)) : 0)
 
-const agentSvg = (W: number, a: AgentRun, at: number): string => {
+// A row's parts, each placed at x, so the catalog can draw one alone (x = 0).
+
+// The tier word in its colour, then model · effort, the round and an error.
+const agentBadgeSvg = (W: number, a: AgentRun, x: number, y: number): string => {
   const s = tr()
   const tier = tierOf(a.type)
-  const color = colorOf(tier)
-  const ctx = ctxOf(a)
-  const textW = W - 42 - 22
   const meta = [runModel(a)]
   if (a.round > 1) meta.push(`${s.round} ${a.round}`)
   if (a.status === 'failed') meta.push(s.failed)
-  const barW = textW
-  const progress = progressOf(a)
-  const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
+  return `<text ${startText(W, x, y)} font-family="${FONT}" font-size="11"><tspan fill="${colorOf(tier)}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>`
+}
+
+const agentStats = (a: AgentRun, at: number): string =>
+  `${tr().ctx} ${ctxOf(a)}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
+
+// The worker's reported steps, left of the stats on the same line.
+const agentStepsSvg = (W: number, a: AgentRun, at: number, x: number, y: number, barW: number): string => {
   const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
-  const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
-  // Without reported steps the bar falls back to the context, drawn grey.
-  const fillW = Math.round(barW * (progress ?? ctx / 100))
+  const stepsW = Math.max(0, barW - textWidth(agentStats(a, at), 11) - 12)
+  return steps && stepsW > 30
+    ? `<text class="t" ${startText(W, x, y)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>`
+    : ''
+}
+
+// Context, cost and time, ending where the bar ends.
+const agentStatsSvg = (W: number, a: AgentRun, at: number, x: number, y: number, barW: number): string =>
+  `<text class="s" ${endText(W, x + barW, y, true)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${agentStats(a, at)}</text>`
+
+// The task's progress in the tier's colour; without reported steps, the context in grey.
+const agentBarSvg = (W: number, a: AgentRun, x: number, y: number, barW: number): string => {
+  const progress = progressOf(a)
+  const fillW = Math.round(barW * (progress ?? ctxOf(a) / 100))
+  return `<rect class="k" x="${mx(W, x, barW)}" y="${y}" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${mx(W, x, fillW)}" y="${y}" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${colorOf(tierOf(a.type))}"`}/>`
+}
+
+const agentSvg = (W: number, a: AgentRun, at: number): string => {
+  const color = colorOf(tierOf(a.type))
+  const textW = W - 42 - 22
+  const barW = textW
   return svg(
     W,
     66,
     `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running')}
 <text class="t" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
-<text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
-${steps && stepsW > 30 ? `<text class="t" ${startText(W, 42, 49)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
-<text class="s" ${endText(W, 42 + barW, 49, true)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${stats}</text>
-<rect class="k" x="${mx(W, 42, barW)}" y="55" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${mx(W, 42, fillW)}" y="55" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${color}"`}/>
+${agentBadgeSvg(W, a, 42, 34)}
+${agentStepsSvg(W, a, at, 42, 49, barW)}
+${agentStatsSvg(W, a, at, 42, 49, barW)}
+${agentBarSvg(W, a, 42, 55, barW)}
 ${statusMark(mx(W, W - 8), 16, a.status, color)}
 <line class="ln" x1="0" y1="65.5" x2="${W}" y2="65.5"/>`,
   )
@@ -775,6 +801,373 @@ const ctxBar = (pct: number, width: number): string => {
 }
 
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
+
+// ---------------------------------------------------------------------------
+// Element builders: the band and the pane are drawn from these, both in place
+// and in the /mods hub's component catalog, so the two never drift apart.
+
+type Ui = ElementTable
+type Press = ButtonProps['onPress']
+
+// What a pane is drawn at: the desktop draws SVG rows, every other surface text rows.
+type Frame = {
+  ui: Ui
+  Svg?: ElementConstructor<SvgProps>
+  // The desktop's row width in px.
+  W: number
+  // The text bars' width in cells.
+  barW: number
+}
+
+const paneFrame = (ui: Ui, surface: string, columns: number): Frame => {
+  const cols = Math.max(24, columns || 40)
+  return {
+    ui,
+    Svg: surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined,
+    W: Math.max(240, Math.min(900, (columns || 40) * 8 - 8)),
+    barW: Math.max(6, Math.min(20, cols - 34)),
+  }
+}
+
+// Everything the pane shows, worked out from the session's values.
+type PaneView = {
+  running: AgentRun[]
+  finished: AgentRun[]
+  planned: Planned[]
+  t: ReturnType<typeof totals>
+  title: string
+  at: number
+  isEmpty: boolean
+}
+
+const paneView = (list: AgentRun[], f: Flow | null, at: number): PaneView => {
+  const planned = plannedOf(f, list)
+  return {
+    running: list.filter(a => a.status === 'running').reverse(),
+    finished: list.filter(a => a.status !== 'running').reverse(),
+    planned,
+    t: totals(list, at),
+    // The pane's title says "Agents"; inside, only the flow's own name.
+    title: f && !f.isFinished ? f.title : '',
+    at,
+    isEmpty: list.length === 0 && planned.length === 0,
+  }
+}
+
+const totalsSummary = (t: ReturnType<typeof totals>): string => `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${tr().tokensWord}, ${fmtTime(t.time)}`
+
+const compactButton = (fr: Frame, isCompact: boolean, onPress: Press): RenderElement => {
+  const { Button } = fr.ui
+  return <Button key="compact" label={isCompact ? tr().expand : tr().collapse} plain onPress={onPress} />
+}
+
+const finishedToggle = (fr: Frame, isCollapsed: boolean, count: number, onPress: Press): RenderElement => {
+  const { Button } = fr.ui
+  return <Button key="done" label={`${isCollapsed ? (isRtl() ? '◂' : '▸') : '▾'} ${tr().finished} · ${count}`} plain onPress={onPress} />
+}
+
+// "Running · 2", "Planned · 3": a dim heading over its rows.
+const sectionHead = (fr: Frame, key: string, text: string): RenderElement => {
+  const { Text } = fr.ui
+  return (
+    <Text key={key} dimColor>
+      {text}
+    </Text>
+  )
+}
+
+const emptyLine = (fr: Frame): RenderElement => {
+  const { Text } = fr.ui
+  return (
+    <Text key="empty" dimColor>
+      {tr().empty}
+    </Text>
+  )
+}
+
+// Desktop: the flow's name over the cost, tokens and time tiles; no name, tiles only.
+const headerTiles = (fr: Frame, title: string, t: ReturnType<typeof totals>): RenderElement => {
+  if (!fr.Svg) return totalsLine(fr, t)
+  const { Svg } = fr
+  const summary = totalsSummary(t)
+  return <Svg key="header" source={headerSvg(fr.W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={fr.W} height={headerHeight(title)} />
+}
+
+// Text surfaces: the flow's name with the collapse button at the right.
+const titleRow = (fr: Frame, title: string, compact: RenderElement): RenderElement => {
+  const { Box, Text } = fr.ui
+  return (
+    <Box key="title" flexDirection="row" justifyContent="space-between">
+      <Text bold wrap="truncate-end">
+        {title}
+      </Text>
+      {compact}
+    </Box>
+  )
+}
+
+// Text surfaces: the cost, tokens and time line.
+const totalsLine = (fr: Frame, t: ReturnType<typeof totals>): RenderElement => {
+  const { Text } = fr.ui
+  return (
+    <Text key="totals" dimColor>
+      ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {tr().tokensWord} · {fmtTime(t.time)}
+    </Text>
+  )
+}
+
+// The dotted grid behind the desktop pane, stacked from tiles the engine accepts.
+const gridBackdrop = (fr: Frame, gridH: number): RenderElement[] => {
+  const { Svg } = fr
+  if (!Svg) return []
+  return gridTiles(gridH).map((tileH, i) => <Svg key={`grid-${i}`} source={gridSvg(fr.W, tileH)} alt="dotted grid" width={fr.W} height={tileH} />)
+}
+
+// Text rows' parts: the crab glyph, the name and the status; the tier and model; the bar and stats.
+const termRowTitle = (fr: Frame, a: AgentRun): RenderElement => {
+  const { Box, Text } = fr.ui
+  const color = colorOf(tierOf(a.type))
+  return (
+    <Box flexDirection="row" gap={1}>
+      <Text color={color}>▣</Text>
+      <Text bold wrap="truncate-end">
+        {a.description || a.type}
+      </Text>
+      <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
+    </Box>
+  )
+}
+
+const termBadge = (fr: Frame, a: AgentRun): RenderElement => {
+  const { Text } = fr.ui
+  const tier = tierOf(a.type)
+  return (
+    <Text dimColor wrap="truncate-end">
+      {'  '}
+      {tier === 'other' ? a.type : tierWord(tier)} · {runModel(a)}
+      {a.round > 1 ? ` · ${tr().round} ${a.round}` : ''}
+    </Text>
+  )
+}
+
+const termBar = (fr: Frame, a: AgentRun): RenderElement => {
+  const { Text } = fr.ui
+  const progress = progressOf(a)
+  return progress === null ? <Text dimColor>{ctxBar(ctxOf(a), fr.barW)}</Text> : <Text color={colorOf(tierOf(a.type))}>{ctxBar(progress * 100, fr.barW)}</Text>
+}
+
+const termSteps = (a: AgentRun): string => (a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : '')
+
+const termStats = (a: AgentRun, at: number): string => `${tr().ctx} ${ctxOf(a)}% · ${fmtTokens(a.contextTokens)} ≈${fmtCost(a.costUsd)} ${fmtTime(elapsed(a, at))}`
+
+const termProgress = (fr: Frame, a: AgentRun, at: number): RenderElement => {
+  const { Text } = fr.ui
+  return (
+    <Text wrap="truncate-end">
+      {'  '}
+      {termBar(fr, a)}
+      <Text dimColor>
+        {' '}
+        {termSteps(a)}
+        {termStats(a, at)}
+      </Text>
+    </Text>
+  )
+}
+
+// One subagent: an SVG row on the desktop, three text lines elsewhere.
+const agentRow = (fr: Frame, a: AgentRun, at: number): RenderElement => {
+  const s = tr()
+  const { Box } = fr.ui
+  if (fr.Svg) {
+    const { Svg } = fr
+    const word = a.status === 'running' ? s.isRunning : s.isFinished
+    return <Svg key={a.id} source={agentSvg(fr.W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${word}`} width={fr.W} height={66} />
+  }
+  return (
+    <Box key={a.id} flexDirection="column" marginBottom={1}>
+      {termRowTitle(fr, a)}
+      {termBadge(fr, a)}
+      {termProgress(fr, a, at)}
+    </Box>
+  )
+}
+
+// A task the flow planned that no run has picked up yet, dimmed.
+const plannedRow = (fr: Frame, pl: Planned): RenderElement => {
+  const { Box, Text } = fr.ui
+  if (fr.Svg) {
+    const { Svg } = fr
+    return <Svg key={`plan-${pl.n}`} source={plannedSvg(fr.W, pl)} alt={`${pl.n}. ${pl.title}: ${tr().isPlanned}`} width={fr.W} height={46} />
+  }
+  const tier = pl.tier in TIER_COLOR ? pl.tier : 'other'
+  return (
+    <Box key={`plan-${pl.n}`} flexDirection="column" marginBottom={1}>
+      <Text dimColor wrap="truncate-end">
+        <Text color={colorOf(tier)}>▢</Text> {pl.n}. {pl.title} ◷
+      </Text>
+      <Text dimColor wrap="truncate-end">
+        {'  '}
+        {tierWord(tier)} · {tierModel(tier)}
+        {pl.after.length ? ` · ${tr().after} ${pl.after.join(', ')}` : ''}
+      </Text>
+    </Box>
+  )
+}
+
+// The collapsed pane: one crab (or glyph) per agent and the totals.
+const compactRow = (fr: Frame, v: PaneView): RenderElement => {
+  const { Text } = fr.ui
+  const list = [...v.running, ...v.finished]
+  if (fr.Svg) {
+    const { Svg } = fr
+    return <Svg key="compact-row" source={compactSvg(fr.W, list, v.planned, v.t)} alt={`${list.length} ${tr().agentsCount}, ${totalsSummary(v.t)}`} width={fr.W} height={32} />
+  }
+  return (
+    <Text key="compact-row" wrap="truncate-end">
+      {list.map(a => (
+        <Text key={a.id} color={colorOf(tierOf(a.type))}>
+          {STATUS_GLYPH[a.status]}{' '}
+        </Text>
+      ))}
+      {v.planned.map(pl => (
+        <Text key={`plan-${pl.n}`} dimColor>
+          ◷{' '}
+        </Text>
+      ))}
+    </Text>
+  )
+}
+
+// The whole agents pane.
+const paneTree = (fr: Frame, v: PaneView, p: Panel, onCompact: Press, onDone: Press): RenderElement => {
+  const s = tr()
+  const { Box } = fr.ui
+  const compact = compactButton(fr, p.isCompact, onCompact)
+  const done = finishedToggle(fr, p.isDoneCollapsed, v.finished.length, onDone)
+  const { running, finished, planned } = v
+
+  if (fr.Svg) {
+    // In Hebrew the column hugs the right edge: section heads and buttons right-aligned.
+    const align = isRtl() ? 'flex-end' : undefined
+    if (p.isCompact) {
+      return (
+        <Box flexDirection="column" gap={1} alignItems={align}>
+          {compactRow(fr, v)}
+          {compact}
+        </Box>
+      )
+    }
+    const shownDone = p.isDoneCollapsed ? 0 : finished.length
+    const lines = 1 + (v.isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
+    const gridH = headerHeight(v.title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+    return (
+      <Box flexDirection="column">
+        {/* The grid sizes the pane; the content is placed over it, as an
+            absolute Box paints over the siblings before it. */}
+        {gridBackdrop(fr, gridH)}
+        <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
+          {headerTiles(fr, v.title, v.t)}
+          {compact}
+          {v.isEmpty && emptyLine(fr)}
+          {running.length > 0 && sectionHead(fr, 'h-run', `${s.running} · ${running.length}`)}
+          {running.map(a => agentRow(fr, a, v.at))}
+          {finished.length > 0 && done}
+          {!p.isDoneCollapsed && finished.map(a => agentRow(fr, a, v.at))}
+          {planned.length > 0 && sectionHead(fr, 'h-plan', `${s.planned} · ${planned.length}`)}
+          {planned.map(pl => plannedRow(fr, pl))}
+        </Box>
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column">
+      {titleRow(fr, v.title, compact)}
+      {totalsLine(fr, v.t)}
+      {p.isCompact ? (
+        compactRow(fr, v)
+      ) : (
+        <Box flexDirection="column" marginTop={1}>
+          {v.isEmpty && emptyLine(fr)}
+          {running.length > 0 && sectionHead(fr, 'h-run', `${s.running} · ${running.length}`)}
+          {running.map(a => agentRow(fr, a, v.at))}
+          {finished.length > 0 && done}
+          {!p.isDoneCollapsed && finished.map(a => agentRow(fr, a, v.at))}
+          {planned.length > 0 && sectionHead(fr, 'h-plan', `${s.planned} · ${planned.length}`)}
+          {planned.map(pl => plannedRow(fr, pl))}
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+// --- the band above the prompt
+
+// "×3": how many agents and planned tasks; a press opens or closes the pane.
+const crewButton = (ui: Ui, crew: number, onPress: Press): RenderElement => {
+  const { Button } = ui
+  return <Button key="savvy-agents" label={`×${crew}`} plain onPress={onPress} />
+}
+
+// ✕: forgets the flow, which takes the band down.
+const dismissButton = (ui: Ui, onPress: Press): RenderElement => {
+  const { Button } = ui
+  return <Button key="savvy-dismiss" label="✕" plain role="dismiss" onPress={onPress} />
+}
+
+// The band's crab on a text surface: one glyph in the clay colour.
+const termCrab = (ui: Ui): RenderElement => {
+  const { Text } = ui
+  return <Text color={CLAY}>▣</Text>
+}
+
+type BandProps = { f: Flow; crew: number; isWorking: boolean; onCrew: Press; onDismiss: Press; below?: unknown }
+
+// The whole band: one SVG row and two buttons on remote surfaces, text cells in the terminal.
+const bandTree = (ui: Ui, surface: string, columns: number, b: BandProps): RenderElement => {
+  const { Box, Text } = ui
+  const { f } = b
+  const percent = `${Math.round(ratio(f) * 100)}%`
+  const below = (b.below ?? null) as RenderElement | null
+  // The terminal's element table is completed with an `Svg` that draws nothing: test the surface too.
+  if (surface !== 'terminal' && 'Svg' in ui) {
+    const { Svg } = ui
+    // About 8 CSS px per reported column; the rest is the count, the dismiss
+    // and their gaps. No floor above the slot: a row wider than it would wrap.
+    const width = Math.max(180, Math.min(1600, (columns || 100) * 8 - 96))
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
+          <Svg source={rowSvg(f, width, b.isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
+          {crewButton(ui, b.crew, b.onCrew)}
+          {dismissButton(ui, b.onDismiss)}
+        </Box>
+        {below}
+      </Box>
+    )
+  }
+
+  const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(columns / 3)))
+  const width = Math.max(6, Math.min(40, columns - titleW - 32))
+  return (
+    <Box flexDirection="column">
+      <Box flexDirection="row" gap={2}>
+        <Box width={titleW} flexShrink={0}>
+          <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
+          <Text wrap="truncate-end">{f.title}</Text>
+        </Box>
+        <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
+        <Text bold>{label(f)}</Text>
+        <Text dimColor>{percent}</Text>
+        {termCrab(ui)}
+        {crewButton(ui, b.crew, b.onCrew)}
+        {dismissButton(ui, b.onDismiss)}
+      </Box>
+      {below}
+    </Box>
+  )
+}
 
 // Opens the agents pane, or closes it when it is up; true when it ends up open.
 async function togglePane($: EngineInterface): Promise<boolean> {
@@ -1237,177 +1630,16 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const s = tr()
-    const ui = $.ui.resolve(e)
-    const { Box, Text, Button } = ui
     const list = await read($, agents)
     const f = await read($, flow)
     const p: Panel = await read($, panel)
     const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
-
-    const running = list.filter(a => a.status === 'running').reverse()
-    const finished = list.filter(a => a.status !== 'running').reverse()
-    const planned = plannedOf(f, list)
-    const t = totals(list, at)
-    // The pane's title says "Agents"; inside, only the flow's own name.
-    const title = f && !f.isFinished ? f.title : ''
-
-    const toggleCompact = (
-      <Button
-        key="compact"
-        label={p.isCompact ? s.expand : s.collapse}
-        plain
-        onPress={() => update($, panel, prev => ({ ...prev, isCompact: !prev.isCompact }))}
-      />
-    )
-    const toggleDone = (
-      <Button
-        key="done"
-        label={`${p.isDoneCollapsed ? (isRtl() ? '◂' : '▸') : '▾'} ${s.finished} · ${finished.length}`}
-        plain
-        onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
-      />
-    )
-    const isEmpty = list.length === 0 && planned.length === 0
-    const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
-
-    if (e.surface === 'desktop' && 'Svg' in ui) {
-      const { Svg } = ui
-      const W = Math.max(240, Math.min(900, (e.props.bodyColumns || 40) * 8 - 8))
-      const section = (key: string, text: string) => (
-        <Text key={key} dimColor>
-          {text}
-        </Text>
-      )
-
-      // In Hebrew the column hugs the right edge: section heads and buttons right-aligned.
-      const align = isRtl() ? 'flex-end' : undefined
-      if (p.isCompact) {
-        return (
-          <Box flexDirection="column" gap={1} alignItems={align}>
-            <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
-            {toggleCompact}
-          </Box>
-        )
-      }
-      const shownDone = p.isDoneCollapsed ? 0 : finished.length
-      const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-      const gridH = headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
-      return (
-        <Box flexDirection="column">
-          {/* The grid sizes the pane; the content is placed over it, as an
-              absolute Box paints over the siblings before it. */}
-          {gridTiles(gridH).map((tileH, i) => (
-            <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
-          ))}
-          <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
-            <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
-            {toggleCompact}
-            {isEmpty && <Text dimColor>{s.empty}</Text>}
-            {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
-            {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
-            ))}
-            {finished.length > 0 && toggleDone}
-            {!p.isDoneCollapsed &&
-              finished.map(a => (
-                <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
-              ))}
-            {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
-            {planned.map(pl => (
-              <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={46} />
-            ))}
-          </Box>
-        </Box>
-      )
-    }
-
-    // Terminal: the same content in text rows.
-    const cols = Math.max(24, e.props.bodyColumns || 40)
-    const barW = Math.max(6, Math.min(20, cols - 34))
-    const row = (a: AgentRun) => {
-      const tier = tierOf(a.type)
-      const color = colorOf(tier)
-      const ctx = ctxOf(a)
-      const progress = progressOf(a)
-      const model = runModel(a)
-      const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
-      return (
-        <Box key={a.id} flexDirection="column" marginBottom={1}>
-          <Box flexDirection="row" gap={1}>
-            <Text color={color}>▣</Text>
-            <Text bold wrap="truncate-end">
-              {a.description || a.type}
-            </Text>
-            <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
-          </Box>
-          <Text dimColor wrap="truncate-end">
-            {'  '}
-            {tier === 'other' ? a.type : tierWord(tier)} · {model}
-            {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
-          </Text>
-          <Text wrap="truncate-end">
-            {'  '}
-            {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
-            <Text dimColor>
-              {' '}
-              {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
-            </Text>
-          </Text>
-        </Box>
-      )
-    }
-
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" justifyContent="space-between">
-          <Text bold wrap="truncate-end">
-            {title}
-          </Text>
-          {toggleCompact}
-        </Box>
-        <Text dimColor>
-          ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
-        </Text>
-        {p.isCompact ? (
-          <Text wrap="truncate-end">
-            {[...running, ...finished].map(a => (
-              <Text key={a.id} color={colorOf(tierOf(a.type))}>
-                {STATUS_GLYPH[a.status]}{' '}
-              </Text>
-            ))}
-            {planned.map(pl => (
-              <Text key={`plan-${pl.n}`} dimColor>
-                ◷{' '}
-              </Text>
-            ))}
-          </Text>
-        ) : (
-          <Box flexDirection="column" marginTop={1}>
-            {isEmpty && <Text dimColor>{s.empty}</Text>}
-            {running.length > 0 && <Text dimColor>{s.running} · {running.length}</Text>}
-            {running.map(row)}
-            {finished.length > 0 && toggleDone}
-            {!p.isDoneCollapsed && finished.map(row)}
-            {planned.length > 0 && <Text dimColor>{s.planned} · {planned.length}</Text>}
-            {planned.map(pl => {
-              const tier = pl.tier in TIER_COLOR ? pl.tier : 'other'
-              return (
-                <Box key={`plan-${pl.n}`} flexDirection="column" marginBottom={1}>
-                  <Text dimColor wrap="truncate-end">
-                    <Text color={colorOf(tier)}>▢</Text> {pl.n}. {pl.title} ◷
-                  </Text>
-                  <Text dimColor wrap="truncate-end">
-                    {'  '}
-                    {tierWord(tier)} · {tierModel(tier)}
-                    {pl.after.length ? ` · ${s.after} ${pl.after.join(', ')}` : ''}
-                  </Text>
-                </Box>
-              )
-            })}
-          </Box>
-        )}
-      </Box>
+    return paneTree(
+      paneFrame($.ui.resolve(e), e.surface, e.props.bodyColumns),
+      paneView(list, f, at),
+      p,
+      () => void update($, panel, prev => ({ ...prev, isCompact: !prev.isCompact })),
+      () => void update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed })),
     )
   })
 
@@ -1419,62 +1651,14 @@ export const register: Register = (on, options) => {
     const drawn = await Promise.resolve(next(e)).catch(() => null)
     const below = drawn && typeof drawn === 'object' && (drawn as { type?: string }).type !== 'engine' ? drawn : null
 
-    const ui = $.ui.resolve(e)
-    const { Box, Text, Button } = ui
     const list = await read($, agents)
-    const crew = list.length + plannedOf(f, list).length
-    const isWorking = list.some(a => a.status === 'running')
-    const crewButton = (
-      <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
-    )
-    const percent = `${Math.round(ratio(f) * 100)}%`
-    const dismiss = (
-      <Button
-        key="savvy-dismiss"
-        label="✕"
-        plain
-        role="dismiss"
-        onPress={() => update($, flow, () => null)}
-      />
-    )
-
-    // The terminal's element table is completed with an `Svg` that draws nothing: test the surface too.
-    if (e.surface !== 'terminal' && 'Svg' in ui) {
-      const { Svg } = ui
-      // About 8 CSS px per reported column; the rest is the count, the dismiss
-      // and their gaps. No floor above the slot: a row wider than it would wrap.
-      const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
-      return (
-        <Box flexDirection="column">
-          <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
-            {crewButton}
-            {dismiss}
-          </Box>
-          {below}
-        </Box>
-      )
-    }
-
-    const cols = e.props.bodyColumns
-    const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(cols / 3)))
-    const width = Math.max(6, Math.min(40, cols - titleW - 32))
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" gap={2}>
-          <Box width={titleW} flexShrink={0}>
-            <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
-            <Text wrap="truncate-end">{f.title}</Text>
-          </Box>
-          <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
-          <Text bold>{label(f)}</Text>
-          <Text dimColor>{percent}</Text>
-          <Text color={CLAY}>▣</Text>
-          {crewButton}
-          {dismiss}
-        </Box>
-        {below}
-      </Box>
-    )
+    return bandTree($.ui.resolve(e), e.surface, e.props.bodyColumns, {
+      f,
+      crew: list.length + plannedOf(f, list).length,
+      isWorking: list.some(a => a.status === 'running'),
+      onCrew: () => void togglePane($),
+      onDismiss: () => void update($, flow, () => null),
+      below,
+    })
   })
 }
