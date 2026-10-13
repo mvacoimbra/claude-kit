@@ -73,13 +73,26 @@ export type SavvyPanel = {
 }
 export type SavvyActArgs = { id: string; value?: string }
 export type SavvyActResult = { message?: string }
+// One component the mod draws, for the hub's Components tab.
+export type SavvyCatalogEntry = {
+  // Stable, kebab-case: what a person names when asking for a change.
+  id: string
+  // The component's name, as a person would say it ("Progress band, done").
+  name: string
+  // One line on what it is and where it shows.
+  help?: string
+  // The component drawn for `args.surface` at `args.columns`, from the same builders the mod
+  // draws it with in place, in a state worth seeing. Static: a press cannot cross to the mod.
+  tree: unknown
+}
 
 declare module 'claude-code' {
-  // What savvy-progress adds to `$`: its tab in the /mods hub.
+  // What savvy-progress adds to `$`: its tab in the /mods hub and its component catalog.
   interface EngineInterface {
     savvy: {
       panel: (args: SavvyPanelArgs) => Promise<SavvyPanel>
       act: (args: SavvyActArgs) => Promise<SavvyActResult>
+      catalog: (args: SavvyPanelArgs) => Promise<SavvyCatalogEntry[]>
     }
   }
 
