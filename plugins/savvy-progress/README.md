@@ -3,7 +3,14 @@
 A Claude Code mod: a progress bar above the prompt and a live panel of subagents. Made for the [savvy-flow](../savvy-flow) skill, and useful with any subagents.
 
 - **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a button with the crew size that opens the panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts.
-- **Agents panel** (`/agents-info` toggles it; `/agents-info open` opens it or brings it forward without toggling): running, finished and planned subagents with model, effort, task progress, context, estimated cost and time. Working crabs walk, and each savvy tier animates its prop: the astronaut floats, the detective sweeps the magnifier, the engineer turns the wrench, the chef tosses the omelette, the racer runs with a fluttering flag. `prefers-reduced-motion` stops them.
+- **Agents panel** (open it from the Agents tab in `/mods`, or with the crew button on the progress bar): running, finished and planned subagents with model, effort, task progress, context, estimated cost and time. Working crabs walk, and each savvy tier animates its prop: the astronaut floats, the detective sweeps the magnifier, the engineer turns the wrench, the chef tosses the omelette, the racer runs with a fluttering flag. `prefers-reduced-motion` stops them.
+
+## In `/mods`
+
+The mod has no slash command of its own: it is a tab in the `/mods` panel of the claude-mods-hub mod, which draws it from `$.savvy`. The **Agents** tab (**Agentes** in Portuguese) shows:
+
+- **Overview**: running, finished and planned agents, the current flow's progress, and the estimated cost, tokens and time so far, plus **Open the agents panel**, which opens the pane (or brings it forward). While agents run, the hub redraws the counts every 5 seconds.
+- **Settings**: the two options below, `language` and `autoOpen`, changed in place.
 
 ## Tools it adds
 
@@ -20,6 +27,6 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 { "pluginConfigs": { "savvy-progress": { "options": { "language": "ru" } } } }
 ```
 
-`autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
+`autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. Either way it can be opened from `/mods`, and the crew button on the progress bar toggles it. Both settings can also be changed in the Agents tab of `/mods`.
 
 Install instructions are in the [repository README](../../README.md).
