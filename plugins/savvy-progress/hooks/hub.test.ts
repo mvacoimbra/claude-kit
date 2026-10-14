@@ -62,13 +62,14 @@ test('hub: the panel is an Agents tab with the open action', { plugins: [HUB] },
   expect(p.summary).toBe('no agents this session')
   expect(p.sections.map(s => [s.id, s.title])).toEqual([
     ['overview', 'This session'],
-    ['view', 'Agents panel'],
+    ['view', 'View'],
     ['settings', 'Settings'],
   ])
   // Opening the pane is this session's; the view choices and settings are the user's.
   expect(action(p, 'open')).toEqual({
     kind: 'action',
     id: 'open',
+    title: 'Agents panel',
     label: 'Open panel',
     help: expect.any(String),
     primary: true,
@@ -76,6 +77,10 @@ test('hub: the panel is an Agents tab with the open action', { plugins: [HUB] },
   })
   expect(toggle(p, 'compact')).toMatchObject({ value: false, scope: 'user' })
   expect(toggle(p, 'hideFinished')).toMatchObject({ value: false, scope: 'user' })
+  // The group's main action comes last.
+  expect(items(p, 'view').at(-1)).toMatchObject({ kind: 'action', id: 'open' })
+  // No flow: no ring beside the summary.
+  expect(p.percent).toBeUndefined()
   // Nothing runs: no redraw countdown.
   expect(p.refreshMs).toBeUndefined()
   expect(items(p, 'settings').map(i => (i.kind === 'choice' ? [i.id, i.value] : i.kind))).toEqual([
@@ -90,8 +95,8 @@ test('hub: Portuguese when the hub asks for it', { plugins: [HUB] }, async ($, o
 
   expect(p.title).toBe('Agentes')
   expect(p.summary).toBe('nenhum agente nesta sessão')
-  expect(p.sections.map(s => s.title)).toEqual(['Esta sessão', 'Painel de agentes', 'Ajustes'])
-  expect(action(p, 'open')).toMatchObject({ label: 'Abrir painel', primary: true })
+  expect(p.sections.map(s => s.title)).toEqual(['Esta sessão', 'Exibição', 'Ajustes'])
+  expect(action(p, 'open')).toMatchObject({ title: 'Painel de agentes', label: 'Abrir painel', primary: true })
   expect(items(p, 'overview').filter(i => i.kind === 'info').map(i => (i.kind === 'info' ? i.label : ''))).toEqual([
     'Em execução',
     'Concluídos',
@@ -107,7 +112,8 @@ test('hub: the flow and the running agents show, with a refresh while they run',
   await $.agent.spawn({ prompt: 'go', description: 'Write the parser', subagentType: 'savvy-careful', tool_use_id: 't1' } as never)
 
   const p = await hub.panel($, { lang: 'en', ...ARGS })
-  expect(p.summary).toBe('Ship it: tasks 1/4 · 25% · 1 running')
+  expect(p.summary).toBe('1/4 · 1 running')
+  expect(p.percent).toBe(25)
   expect(items(p, 'overview')).toContainEqual({ kind: 'info', label: 'Flow', value: 'Ship it: tasks 1/4 · 25%', tone: 'accent' })
   expect(items(p, 'overview')).toContainEqual({ kind: 'info', label: 'Running', value: '1', tone: 'accent' })
   expect(p.refreshMs).toBe(5000)
@@ -118,7 +124,7 @@ test('hub: the flow and the running agents show, with a refresh while they run',
   expect(running?.items.every(i => i.kind === 'tree')).toBe(true)
 
   const pt = await hub.panel($, { lang: 'pt', ...ARGS })
-  expect(pt.summary).toBe('Ship it: tarefas 1/4 · 25% · 1 em execução')
+  expect(pt.summary).toBe('1/4 · 1 em execução')
 })
 
 test('hub: act open opens the agents pane', { plugins: [HUB] }, async ($, on) => {

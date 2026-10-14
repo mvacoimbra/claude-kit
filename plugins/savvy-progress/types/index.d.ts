@@ -65,7 +65,7 @@ export type SavvyScope = 'user' | 'session'
 export type SavvyItem =
   | { kind: 'toggle'; id: string; label: string; help?: string; value: boolean; scope?: SavvyScope }
   | { kind: 'choice'; id: string; label: string; help?: string; value: string; options: { value: string; label: string }[]; scope?: SavvyScope }
-  | { kind: 'action'; id: string; label: string; help?: string; primary?: boolean; scope?: SavvyScope }
+  | { kind: 'action'; id: string; label: string; title?: string; help?: string; primary?: boolean; scope?: SavvyScope }
   | { kind: 'input'; id: string; label: string; help?: string; placeholder?: string; submitLabel?: string; scope?: SavvyScope }
   | { kind: 'info'; label: string; value: string; tone?: SavvyTone }
   | { kind: 'text'; text: string; tone?: SavvyTone }
@@ -78,6 +78,8 @@ export type SavvyPanel = {
   // One line for the overview and under the tab row.
   summary?: string
   tone?: SavvyTone
+  // The flow's progress, 0-100: the hub draws a ring beside the summary.
+  percent?: number
   // Drawn as sub-tabs when there is more than one.
   sections: SavvySection[]
   // While this tab shows, the hub draws it again this often (a countdown).

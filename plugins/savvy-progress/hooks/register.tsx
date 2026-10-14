@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ButtonProps, EngineInterface, PluginOptions, Register, RenderElement } from 'claude-code'
 
-import { empty, group, kitOf, meter, status, text } from './kit/kit'
+import { empty, group, kitOf, meter, staticTree, status, text } from './kit/kit'
 import type { Kit, KitUi } from './kit/kit'
 import { hexOf, toneOf } from './kit/tone'
 import type { KitSkin, KitTone } from './kit/tone'
@@ -1114,7 +1114,8 @@ const HUB = {
   en: {
     title: 'Agents',
     overview: 'This session',
-    view: 'Agents panel',
+    view: 'View',
+    panelTitle: 'Agents panel',
     settings: 'Settings',
     nRunning: (n: number) => `${n} running`,
     nDone: (n: number) => `${n} done`,
@@ -1158,7 +1159,8 @@ const HUB = {
   pt: {
     title: 'Agentes',
     overview: 'Esta sessão',
-    view: 'Painel de agentes',
+    view: 'Exibição',
+    panelTitle: 'Painel de agentes',
     settings: 'Ajustes',
     nRunning: (n: number) => `${n} em execução`,
     nDone: (n: number) => `${n} ${n === 1 ? 'concluído' : 'concluídos'}`,
@@ -1224,6 +1226,15 @@ const flowProgress = (h: Hub, f: Flow): string => {
   return f.total ? `${word} ${f.done}/${f.total} · ${Math.round(ratio(f) * 100)}%` : `${word}: ${f.running} ${h.busy}`
 }
 
+// "2/6", "review 5/6", "planning": the flow's short state for the summary line.
+const flowShort = (h: Hub, f: Flow): string => {
+  if (f.isFinished) return h.flowDone
+  if (f.phase === 'plan') return h.planning
+  if (f.phase === 'design') return h.design
+  if (!f.total) return ''
+  return f.phase === 'review' ? `${h.review} ${f.done}/${f.total}` : `${f.done}/${f.total}`
+}
+
 // The finished agents the tab lists as rows; the panel lists them all.
 const HUB_FINISHED = 8
 
@@ -1243,8 +1254,10 @@ async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: Plugin
   const planned = v.planned.length
   const isFlowLive = f !== null && !f.isFinished
 
-  const counts = [running ? h.nRunning(running) : '', finished ? h.nDone(finished) : '', planned ? h.nPlanned(planned) : ''].filter(Boolean)
-  const summary = [isFlowLive ? `${f.title}: ${flowProgress(h, f)}` : '', counts.length ? counts.join(' · ') : h.none].filter(Boolean).join(' · ')
+  // One short line under the mod's name: the flow's count and what runs; the ring beside it
+  // carries the percent.
+  const count = running ? h.nRunning(running) : planned ? h.nPlanned(planned) : finished ? h.nDone(finished) : ''
+  const summary = [isFlowLive ? flowShort(h, f) : '', count].filter(Boolean).join(' · ') || h.none
 
   const overview: SavvyItem[] = []
   if (f !== null) overview.push({ kind: 'info', label: h.flow, value: `${f.title}: ${flowProgress(h, f)}`, tone: f.isFinished ? 'ok' : 'accent' })
@@ -1268,7 +1281,7 @@ async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: Plugin
 
   // The agents themselves, as the pane draws them: plain data, one row per item.
   const k = kitOf($.ui.resolve({ surface: args.surface, component: 'Pane' }) as unknown as KitUi, toneOf(await skinOf($)), args.surface, Math.max(24, args.columns - 4))
-  const tree = (el: RenderElement): SavvyItem => ({ kind: 'tree', tree: staticTree(el) })
+  const tree = (el: RenderElement): SavvyItem => ({ kind: 'tree', tree: staticTree(el, k.t) })
   const lists: SavvySection[] = []
   if (running) lists.push({ id: 'running', title: `${h.running} · ${running}`, items: v.running.map(a => tree(agentRow(k, a, at, 0))) })
   if (finished) {
@@ -1278,10 +1291,11 @@ async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: Plugin
   }
   if (planned) lists.push({ id: 'planned', title: `${h.planned} · ${planned}`, items: v.planned.map(pl => tree(plannedRow(k, pl, 0))) })
 
+  // The group's main action goes last.
   const viewItems: SavvyItem[] = [
-    { kind: 'action', id: 'open', label: h.open, help: h.openHelp, primary: true, scope: 'session' },
     { kind: 'toggle', id: 'compact', label: h.compact, help: h.compactHelp, value: view.isCompact, scope: 'user' },
     { kind: 'toggle', id: 'hideFinished', label: h.hideFinished, help: h.hideFinishedHelp, value: view.isDoneCollapsed, scope: 'user' },
+    { kind: 'action', id: 'open', title: h.panelTitle, label: h.open, help: h.openHelp, primary: true, scope: 'session' },
   ]
 
   const settings: SavvyItem[] = (Object.keys(SETTINGS) as Setting[]).map(id => ({
@@ -1297,6 +1311,7 @@ async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: Plugin
   return {
     title: h.title,
     summary,
+    ...(f !== null ? { percent: Math.round(ratio(f) * 100) } : {}),
     ...(running ? { tone: 'accent' as const } : failed ? { tone: 'warn' as const } : {}),
     sections: [
       { id: 'overview', title: h.overview, items: overview },
@@ -1403,27 +1418,6 @@ const inLang = <T,>(l: Lang, draw: () => T): T => {
   }
 }
 
-// A noun's answer crosses as plain data: a Button (an Input, a Select, a Client) becomes
-// a Text with its label, and every function and `press` stamp is dropped.
-const staticTree = (node: unknown): unknown => {
-  if (Array.isArray(node)) return node.map(staticTree)
-  if (node === null || typeof node !== 'object') return typeof node === 'function' ? undefined : node
-  const element = node as { type?: unknown; props?: Record<string, unknown> }
-  if (element.type === 'Button' || element.type === 'Input' || element.type === 'Select' || element.type === 'Client') {
-    const label = String(element.props?.label ?? element.props?.placeholder ?? element.props?.key ?? '')
-    return { type: 'Text', props: element.props?.dimColor === true ? { dimColor: true } : {}, children: [element.type === 'Button' ? `[ ${label} ]` : label] }
-  }
-  return Object.fromEntries(
-    Object.entries(element)
-      .filter(([key, value]) => key !== 'press' && typeof value !== 'function')
-      .map(([key, value]) => [
-        key,
-        key === 'props' && value !== null && typeof value === 'object'
-          ? Object.fromEntries(Object.entries(value).filter(([, prop]) => typeof prop !== 'function'))
-          : staticTree(value),
-      ]),
-  )
-}
 
 type Words = { name: string; help: string }
 
@@ -1649,7 +1643,7 @@ async function catalogOf($: EngineInterface, args: SavvyPanelArgs): Promise<Savv
 
   return draws.map(([id, draw]) => {
     const w = words[id] ?? { name: id, help: '' }
-    return { id, name: w.name, help: w.help, tree: staticTree(draw()) }
+    return { id, name: w.name, help: w.help, tree: staticTree(draw(), tone) }
   })
 }
 
