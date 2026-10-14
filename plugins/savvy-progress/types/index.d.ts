@@ -41,20 +41,32 @@ export type AgentRun = {
 }
 
 export type Panel = {
+  /** The user's choice, mirrored from the store (`compact`). */
   isCompact: boolean
+  /** The user's choice, mirrored from the store (`hideFinished`). */
   isDoneCollapsed: boolean
+  /** This session's: the flow the pane already opened itself for. */
   autoOpenedFor: string
+}
+
+/** The two userConfig settings, as last read from their config rows. */
+export type Prefs = {
+  language: string
+  autoOpen: string
 }
 
 // What `$.savvy` hands the /mods hub (claude-mods-hub PROTOCOL.md): one tab, drawn by the hub.
 export type SavvyLang = 'en' | 'pt'
 export type SavvyPanelArgs = { lang: SavvyLang; surface: 'terminal' | 'desktop' | 'vscode' | 'mobile'; columns: number }
 export type SavvyTone = 'ok' | 'warn' | 'err' | 'muted' | 'accent'
+// Where a setting lives: the user's (every session and project, the default) or this session's
+// alone. The hub marks the session's.
+export type SavvyScope = 'user' | 'session'
 export type SavvyItem =
-  | { kind: 'toggle'; id: string; label: string; help?: string; value: boolean }
-  | { kind: 'choice'; id: string; label: string; help?: string; value: string; options: { value: string; label: string }[] }
-  | { kind: 'action'; id: string; label: string; help?: string; primary?: boolean }
-  | { kind: 'input'; id: string; label: string; help?: string; placeholder?: string; submitLabel?: string }
+  | { kind: 'toggle'; id: string; label: string; help?: string; value: boolean; scope?: SavvyScope }
+  | { kind: 'choice'; id: string; label: string; help?: string; value: string; options: { value: string; label: string }[]; scope?: SavvyScope }
+  | { kind: 'action'; id: string; label: string; help?: string; primary?: boolean; scope?: SavvyScope }
+  | { kind: 'input'; id: string; label: string; help?: string; placeholder?: string; submitLabel?: string; scope?: SavvyScope }
   | { kind: 'info'; label: string; value: string; tone?: SavvyTone }
   | { kind: 'text'; text: string; tone?: SavvyTone }
   | { kind: 'swatch'; id: string; label: string; color: string; selected: boolean }
@@ -101,6 +113,7 @@ declare module 'claude-code' {
       flow: Flow | null
       agents: AgentRun[]
       panel: Panel
+      prefs: Prefs | null
       now: number
     }
   }
