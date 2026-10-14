@@ -13,7 +13,9 @@ The mod has no slash command of its own: it is a tab in the `/mods` panel of the
 
 - **This session**: the current flow's progress, running, finished and planned agents, and the estimated cost, tokens and time so far.
 - **Running**, **Finished** and **Planned**: this session's agents as rows, drawn as the panel draws them (the eight latest finished ones; the panel lists them all). While agents run, the hub redraws the tab every 5 seconds.
-- **Agents panel**: **Open panel** opens the pane in this session (or brings it forward), plus the panel's two view choices, **Collapsed view** and **Hide finished agents**.
+- **View**: the panel's two view choices, **Collapsed view** and **Hide finished agents**, then **Open panel**, which opens the pane in this session (or brings it forward).
+
+The line under the mod's name in `/mods` is short (`2/6 · 3 running`), with the flow's progress as a ring beside it.
 - **Settings**: the two options below, `language` and `autoOpen`, changed in place.
 
 Settings follow you: the two options live in their config rows and the view choices in the mod's store, both shared by every session, and each session reads them again every few seconds. What runs in a session (its flow and its agents) stays that session's.
