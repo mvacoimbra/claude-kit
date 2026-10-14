@@ -1,12 +1,17 @@
 import { atom, read, update } from 'claude-code'
-import type { ButtonProps, ElementConstructor, ElementTable, EngineInterface, PluginOptions, Register, RenderElement, SvgProps } from 'claude-code'
+import type { ButtonProps, EngineInterface, PluginOptions, Register, RenderElement } from 'claude-code'
 
+import { empty, group, kitOf, meter, status, text } from './kit/kit'
+import type { Kit, KitUi } from './kit/kit'
+import { hexOf, toneOf } from './kit/tone'
+import type { KitSkin, KitTone } from './kit/tone'
 import type {
   AgentRun,
   Flow,
   Panel,
   Phase,
   PlannedTask,
+  Prefs,
   SavvyActArgs,
   SavvyActResult,
   SavvyCatalogEntry,
@@ -14,17 +19,30 @@ import type {
   SavvyLang,
   SavvyPanel,
   SavvyPanelArgs,
+  SavvySection,
 } from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
+// The pane's two view choices mirror the user's store (`compact`, `hideFinished`), so every
+// session draws the pane the same way; `autoOpenedFor` is this session's alone.
 const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   isCompact: false,
   isDoneCollapsed: false,
   autoOpenedFor: '',
 })
+// The two userConfig settings as last read from their config rows; null before the first read.
+const prefs = atom({ plugin: 'savvy-progress', key: 'prefs' } as const, null)
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
 
+// The skin every mod wears, from skins; Claude Code's own colours without it.
+async function skinOf($: EngineInterface): Promise<KitSkin | null> {
+  try {
+    return await $.skins.palette()
+  } catch {
+    return null
+  }
+}
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
 // Added to the end of each savvy worker's brief. Their system prompt words step
@@ -41,8 +59,6 @@ const TIERS: readonly string[] = ['fable', 'heavy', 'careful', 'medium', 'light'
 const MAX_TASKS = 200
 const MAX_AFTER = 20
 const MAX_TITLE = 120
-const ACCENT = '#8f8cf4'
-const DONE = '#5fbf8f'
 
 type ProgressInput = {
   title?: string
@@ -71,6 +87,11 @@ const STRINGS = {
     finished: 'Finished',
     planned: 'Planned',
     empty: 'No subagents yet.',
+    emptyHint: 'They show here as they start; a /savvy-flow plan lists its tasks as planned.',
+    dismiss: 'Dismiss',
+    show: 'Show',
+    hide: 'Hide',
+    context: 'context',
     round: 'round',
     failed: 'error',
     after: 'after',
@@ -85,7 +106,6 @@ const STRINGS = {
     tasks: 'Tasks',
     review: 'Review',
     busy: 'running',
-    ctx: 'ctx',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
@@ -100,6 +120,11 @@ const STRINGS = {
     finished: 'Завершены',
     planned: 'Запланированы',
     empty: 'Субагентов пока нет.',
+    emptyHint: 'Они появятся здесь, как только начнут работу; план /savvy-flow покажет свои задачи как запланированные.',
+    dismiss: 'Закрыть',
+    show: 'Показать',
+    hide: 'Скрыть',
+    context: 'контекст',
     round: 'раунд',
     failed: 'ошибка',
     after: 'после',
@@ -114,7 +139,6 @@ const STRINGS = {
     tasks: 'Задачи',
     review: 'Ревью',
     busy: 'в работе',
-    ctx: 'ctx',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
@@ -129,6 +153,11 @@ const STRINGS = {
     finished: 'הסתיימו',
     planned: 'מתוכננים',
     empty: 'עדיין אין סוכנים.',
+    emptyHint: 'הם יופיעו כאן כשיתחילו; תוכנית של ‎/savvy-flow מציגה את המשימות שלה כמתוכננות.',
+    dismiss: 'סגירה',
+    show: 'הצגה',
+    hide: 'הסתרה',
+    context: 'הקשר',
     round: 'סבב',
     failed: 'שגיאה',
     after: 'אחרי',
@@ -143,7 +172,6 @@ const STRINGS = {
     tasks: 'משימות',
     review: 'בדיקה',
     busy: 'בעבודה',
-    ctx: 'הקשר',
     tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', other: 'אחר' },
     effort: { low: 'נמוך', medium: 'בינוני', high: 'גבוה', xhigh: 'גבוה מאוד', max: 'מקסימלי' },
   },
@@ -234,23 +262,6 @@ const label = (f: Flow): string => {
 
 const ratio = (f: Flow): number => (f.isFinished ? 1 : f.total ? f.done / f.total : 0)
 
-// Deterministic noise so the dither does not shimmer between redraws.
-const noise = (x: number, y: number): number => {
-  const s = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453
-  return s - Math.floor(s)
-}
-
-// The whole row is one SVG: the desktop wraps sibling elements onto new lines,
-// so title, bar, percent and the crab live in one drawing; only the count and
-// the dismiss are Buttons beside it.
-const H = 22
-const BAR_H = 16
-const CRAB_W = 26
-// The crab's drawing grid is 30 units wide, props included.
-const CRAB_BOX = 30
-const CELL = 3
-const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-serif"
-
 const xml = (s: string): string =>
   s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c)
 
@@ -277,85 +288,6 @@ const fitText = (s: string, size: number, maxW: number): string => {
   }
   return out + '…'
 }
-
-const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
-  // The title takes what it needs, up to 40% of the row; the bar takes the rest.
-  const title = fitText(f.title, 13, Math.max(60, W * 0.4))
-  const BAR_X = Math.round(16 + textWidth(title, 13) + 12)
-  const BAR_W = Math.max(60, W - BAR_X - 46 - CRAB_W)
-  const color = f.isFinished ? DONE : ACCENT
-  const y0 = (H - BAR_H) / 2
-  const fillW = Math.round(BAR_W * ratio(f))
-  const runW = f.total ? Math.round((BAR_W * Math.min(f.total, f.done + f.running)) / f.total) : 0
-  const dots: string[] = []
-  // Positions are worked out left to right; right to left mirrors each box
-  // inside the bar (`bx`) and across the row (`rx`). Text is never mirrored.
-  const rtl = isRtl()
-  const bx = (x: number, w: number): number => (rtl ? BAR_W - x - w : x)
-  const rx = (x: number, w: number): number => (rtl ? W - x - w : x)
-
-  // Dithered fill: sparse at the start, dense toward the head.
-  const cols = Math.floor(fillW / CELL)
-  const rows = Math.floor(BAR_H / CELL)
-  for (let c = 0; c < cols; c++) {
-    const density = 0.35 + 0.6 * Math.pow(c / Math.max(1, cols), 1.2)
-    for (let r = 0; r < rows; r++) {
-      if (noise(c, r) < density) dots.push(`<rect class="t${Math.floor(noise(r, c) * 4)}" x="${bx(c * CELL + 1, 2)}" y="${r * CELL + 1}" width="2" height="2"/>`)
-    }
-  }
-  // Handed to workers, not yet accepted: a faint second layer.
-  const faint: string[] = []
-  for (let c = cols; c < Math.floor(runW / CELL); c++) {
-    for (let r = 0; r < rows; r++) {
-      if (noise(c + 7, r + 3) < 0.2) faint.push(`<rect class="t${Math.floor(noise(r + 5, c) * 4)}" x="${bx(c * CELL + 1, 1.7)}" y="${r * CELL + 1}" width="1.7" height="1.7"/>`)
-    }
-  }
-
-  const ticks: string[] = []
-  for (let i = 1; i < f.total; i++) {
-    const x = Math.round((BAR_W * i) / f.total)
-    if (x > fillW + 4) ticks.push(`<rect x="${bx(x, 1.5)}" y="${BAR_H / 2 - 4}" width="1.5" height="8" rx="0.75"/>`)
-  }
-
-  const text = label(f)
-  const pillW = Math.round(18 + text.length * 6.6)
-  const pillX = bx(Math.max(0, Math.min(BAR_W - pillW, fillW - pillW)), pillW)
-  const percent = `${Math.round(ratio(f) * 100)}%`
-  // `direction="rtl"` puts Hebrew words and numbers in reading order; `start` is then the right edge.
-  const titleAt = rtl ? `x="${W - 16}" direction="rtl" text-anchor="start"` : 'x="16"'
-  const percentAt = rtl ? `x="${CRAB_W + 6}" y="${H / 2 + 4.5}"` : `x="${W - CRAB_W - 6}" y="${H / 2 + 4.5}" text-anchor="end"`
-  const crabW = CRAB_BOX * 0.8
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-<style>
-.t{fill:#1f1f1f}.m{fill:#8a8a8a}.k{fill:#e4e4e2}.tk{fill:#b4b4b0}
-@media (prefers-color-scheme: dark){.t{fill:#ececec}.m{fill:#9a9a9a}.k{fill:#2c2c2c}.tk{fill:#5a5a5a}}
-/* Pixels twinkle in four out-of-phase groups; a finished bar settles to a slow glow. */
-.t0,.t1,.t2,.t3{animation:tw ${f.isFinished ? 3.2 : 2.2}s ease-in-out infinite}
-.t1{animation-duration:${f.isFinished ? 3.8 : 2.8}s;animation-delay:-.7s}.t2{animation-duration:${f.isFinished ? 4.4 : 1.9}s;animation-delay:-1.3s}.t3{animation-duration:${f.isFinished ? 3.5 : 3.3}s;animation-delay:-.4s}
-@keyframes tw{0%,100%{opacity:1}50%{opacity:${f.isFinished ? 0.8 : 0.3}}}
-@media (prefers-reduced-motion: reduce){.t0,.t1,.t2,.t3{animation:none}}
-</style>
-<defs><clipPath id="c"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath></defs>
-<circle cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${color}"/>
-<text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(title)}</text>
-<g transform="translate(${rx(BAR_X, BAR_W)},${y0})">
-<rect class="k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/>
-<g clip-path="url(#c)">
-<g fill="${color}">${dots.join('')}</g>
-<g fill="${color}" opacity="0.45">${faint.join('')}</g>
-<g class="tk">${ticks.join('')}</g>
-</g>
-<rect x="${pillX}" width="${pillW}" height="${BAR_H}" rx="${BAR_H / 2}" fill="${color}"/>
-<text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle"${rtl ? ' direction="rtl"' : ''} font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
-</g>
-<text class="m" ${percentAt} font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${CRAB_CSS}${bandCrab(rx(W - CRAB_W + 1, crabW), isWorking, rtl)}
-</svg>`
-}
-
-// The band's crab: plain, smaller than the panel's, walking while any agent runs.
-const bandCrab = (x: number, isWorking: boolean, rtl: boolean): string => crab(x, 0, 'other', false, isWorking, 0.8, rtl)
 
 const barText = (f: Flow, width: number): string => {
   const filled = Math.round(width * ratio(f))
@@ -495,30 +427,6 @@ const totals = (list: AgentRun[], at: number) => {
   return { cost, tokens, time: list.length ? end - start : 0 }
 }
 
-// --- desktop drawings: each row is one SVG, as the band above the prompt is.
-
-// The pane's backdrop: a dotted grid as tall as the content laid over it; the
-// row SVGs are transparent, so it shows through between their marks.
-const GRID_STEP = 16
-// A Text or Button row on the desktop is about 20px; the grid errs taller.
-const LINE_H = 24
-// The engine refuses an Svg taller than 4096px, so a long grid is stacked from
-// tiles of at most this height; a multiple of GRID_STEP keeps the dots aligned.
-const GRID_TILE = 4096
-const gridTiles = (H: number) => Array.from({ length: Math.ceil(H / GRID_TILE) }, (_, i) => Math.min(GRID_TILE, H - i * GRID_TILE))
-const gridSvg = (W: number, H: number) => `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-<style>.d{fill:#d9d8d4}@media (prefers-color-scheme: dark){.d{fill:#3a3a38}}</style>
-<defs><pattern id="g" width="${GRID_STEP}" height="${GRID_STEP}" patternUnits="userSpaceOnUse"><circle class="d" cx="${GRID_STEP / 2}" cy="${GRID_STEP / 2}" r="1"/></pattern></defs>
-<rect width="${W}" height="${H}" fill="url(#g)"/>
-</svg>`
-
-const PANE_CSS = `<style>
-.t{fill:#1f1f1f}.s{fill:#6b6b68}.m{fill:#9a9a96}.k{fill:#ecebe8}.ln{stroke:#e4e4e1}.tile{fill:#f4f3f0}
-@media (prefers-color-scheme: dark){.t{fill:#ececec}.s{fill:#a8a8a4}.m{fill:#7d7d79}.k{fill:#2c2c2b}.ln{stroke:#333331}.tile{fill:#262625}}
-.live{animation:p 1.6s ease-in-out infinite}@keyframes p{50%{opacity:.3}}
-@media (prefers-reduced-motion: reduce){.live{animation:none}}
-</style>`
-
 // Pixel Clawd from DockCrab (Clawdy): a 24×18 crab on a 30×28 grid, one costume per tier.
 // The body keeps the brand clay; the tier's color lives in the costume's accent.
 const CLAY = '#D97757'
@@ -642,193 +550,189 @@ const crab = (x: number, y: number, costume: string, dim = false, isWalking = fa
   return `<g transform="${place}" opacity="${dim ? 0.45 : 1}" shape-rendering="crispEdges"><g class="c-${costume}${isWalking ? ' run' : ''}">${body}${group('la')}${group('lb')}</g></g>`
 }
 
-const statusMark = (x: number, y: number, status: string, color: string): string => {
-  if (status === 'running') return `<circle class="live" cx="${x}" cy="${y}" r="3.5" fill="${color}"/>`
-  if (status === 'done') return `<path d="M${x - 5} ${y}l3.5 3.5 6.5-7" fill="none" stroke="#3B9C5F" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
-  if (status === 'failed') return `<path d="M${x - 4} ${y - 4}l8 8M${x + 4} ${y - 4}l-8 8" stroke="#D0453F" stroke-width="1.8" stroke-linecap="round"/>`
-  return `<circle cx="${x}" cy="${y}" r="5" fill="none" stroke="#9a9a96" stroke-width="1.4"/><path d="M${x} ${y - 2.5}v2.8l1.8 1.2" fill="none" stroke="#9a9a96" stroke-width="1.4" stroke-linecap="round"/>`
-}
-
-// Panel rows are laid out left to right; in Hebrew each box mirrors across the
-// row (`mx`) and text hugs the mirrored side. `words` text may hold Hebrew and
-// takes `direction="rtl"` (whose `start` is the right edge); numbers stay
-// left to right so "≈$0.25" keeps its order.
-const mx = (W: number, x: number, w = 0): number => (isRtl() ? W - x - w : x)
-
-// Text that starts at x: left-aligned, or right-aligned at the mirrored x.
-const startText = (W: number, x: number, y: number, words = true): string =>
-  !isRtl()
-    ? `x="${x}" y="${y}"`
-    : `x="${W - x}" y="${y}"${words ? ' direction="rtl" text-anchor="start"' : ' text-anchor="end"'}`
-
-// Text that ends at x: right-aligned, or left-aligned at the mirrored x.
-const endText = (W: number, x: number, y: number, words = false): string =>
-  !isRtl() ? `x="${x}" y="${y}" text-anchor="end"` : `x="${W - x}" y="${y}"${words ? ' direction="rtl" text-anchor="end"' : ''}`
-
-const crabWidth = (scale: number): number => Math.round(CRAB_BOX * scale * 100) / 100
-
-// A panel crab at x in a row of width W: on the mirrored side and facing left in Hebrew.
-const rowCrab = (W: number, x: number, y: number, costume: string, dim = false, isWalking = false): string =>
-  crab(mx(W, x, crabWidth(CRAB_SCALE)), y, costume, dim, isWalking, CRAB_SCALE, isRtl())
-
-const svg = (W: number, H: number, body: string): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${CRAB_CSS}${body}</svg>`
-
-// The pane's own title already says "Agents": the header names the flow, if any.
-const headerSvg = (W: number, title: string, t: ReturnType<typeof totals>): string => {
-  const s = tr()
-  const gap = 6
-  const tw = (W - gap * 2) / 3
-  const top = title ? 28 : 0
-  const tile = (i: number, k: string, v: string) =>
-    `<rect class="tile" x="${mx(W, i * (tw + gap), tw)}" y="${top}" width="${tw}" height="40" rx="8"/>
-<text class="s" ${startText(W, i * (tw + gap) + 9, top + 16)} font-family="${FONT}" font-size="11">${k}</text>
-<text class="t" ${startText(W, i * (tw + gap) + 9, top + 33, false)} font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
-  return svg(
-    W,
-    headerHeight(title),
-    `${title ? `<text class="t" ${startText(W, 0, 15)} font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>` : ''}
-${tile(0, s.cost, '≈' + fmtCost(t.cost))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`,
-  )
-}
-
-const headerHeight = (title: string): number => (title ? 72 : 44)
-
-// The task's own progress when the worker reports steps; a finished run is full.
-const progressOf = (a: AgentRun): number | null => {
-  if (a.status === 'done') return 1
-  if (a.stepTotal) return Math.min(1, (a.stepDone ?? 0) / a.stepTotal)
-  return null
-}
-
-const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round((a.contextTokens / a.contextMax) * 100)) : 0)
-
-// A row's parts, each placed at x, so the catalog can draw one alone (x = 0).
-
-// The tier word in its colour, then model · effort, the round and an error.
-const agentBadgeSvg = (W: number, a: AgentRun, x: number, y: number): string => {
-  const s = tr()
-  const tier = tierOf(a.type)
-  const meta = [runModel(a)]
-  if (a.round > 1) meta.push(`${s.round} ${a.round}`)
-  if (a.status === 'failed') meta.push(s.failed)
-  return `<text ${startText(W, x, y)} font-family="${FONT}" font-size="11"><tspan fill="${colorOf(tier)}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>`
-}
-
-const agentStats = (a: AgentRun, at: number): string =>
-  `${tr().ctx} ${ctxOf(a)}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
-
-// The worker's reported steps, left of the stats on the same line.
-const agentStepsSvg = (W: number, a: AgentRun, at: number, x: number, y: number, barW: number): string => {
-  const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
-  const stepsW = Math.max(0, barW - textWidth(agentStats(a, at), 11) - 12)
-  return steps && stepsW > 30
-    ? `<text class="t" ${startText(W, x, y)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>`
-    : ''
-}
-
-// Context, cost and time, ending where the bar ends.
-const agentStatsSvg = (W: number, a: AgentRun, at: number, x: number, y: number, barW: number): string =>
-  `<text class="s" ${endText(W, x + barW, y, true)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${agentStats(a, at)}</text>`
-
-// The task's progress in the tier's colour; without reported steps, the context in grey.
-const agentBarSvg = (W: number, a: AgentRun, x: number, y: number, barW: number): string => {
-  const progress = progressOf(a)
-  const fillW = Math.round(barW * (progress ?? ctxOf(a) / 100))
-  return `<rect class="k" x="${mx(W, x, barW)}" y="${y}" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${mx(W, x, fillW)}" y="${y}" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${colorOf(tierOf(a.type))}"`}/>`
-}
-
-const agentSvg = (W: number, a: AgentRun, at: number): string => {
-  const color = colorOf(tierOf(a.type))
-  const textW = W - 42 - 22
-  const barW = textW
-  return svg(
-    W,
-    66,
-    `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running')}
-<text class="t" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
-${agentBadgeSvg(W, a, 42, 34)}
-${agentStepsSvg(W, a, at, 42, 49, barW)}
-${agentStatsSvg(W, a, at, 42, 49, barW)}
-${agentBarSvg(W, a, 42, 55, barW)}
-${statusMark(mx(W, W - 8), 16, a.status, color)}
-<line class="ln" x1="0" y1="65.5" x2="${W}" y2="65.5"/>`,
-  )
-}
-
-const plannedSvg = (W: number, p: Planned): string => {
-  const tier = p.tier in TIER_COLOR ? p.tier : 'other'
-  const color = colorOf(tier)
-  const textW = W - 42 - 22
-  const meta = [tierModel(tier)]
-  if (p.after.length) meta.push(`${tr().after} ${p.after.join(', ')}`)
-  return svg(
-    W,
-    46,
-    `${rowCrab(W, 0, 6, tier, true)}
-<text class="s" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 13, textW))}</text>
-<text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tierWord(tier))}</tspan><tspan class="m">  ${xml(meta.filter(Boolean).join('  ·  '))}</tspan></text>
-${statusMark(mx(W, W - 8), 16, 'planned', color)}
-<line class="ln" x1="0" y1="45.5" x2="${W}" y2="45.5"/>`,
-  )
-}
-
-const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>): string => {
-  const icons = [
-    ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: 'running', dim: false })),
-    ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: a.status, dim: false })),
-    ...planned.map(p => ({ k: p.tier in TIER_COLOR ? p.tier : 'other', c: colorOf(p.tier), s: 'planned', dim: true })),
-  ]
-  const fit = Math.max(1, Math.floor((W - 150) / 36))
-  const shown = icons.slice(0, fit)
-  const more = icons.length - shown.length
-  const body = shown
-    .map((ic, i) => rowCrab(W, i * 36, 0, ic.k, ic.dim, ic.s === 'running') + (ic.s === 'running' ? `<circle class="live" cx="${mx(W, i * 36 + 32)}" cy="4" r="3" fill="${ic.c}"/>` : ''))
-    .join('')
-  const x = shown.length * 36 + (more ? 4 : 0)
-  return svg(
-    W,
-    32,
-    `${body}${more ? `<text class="s" ${startText(W, x, 21, false)} font-family="${FONT}" font-size="12">+${more}</text>` : ''}
-<text class="s" ${endText(W, W, 21)} font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">≈${fmtCost(t.cost)} · ${fmtTokens(t.tokens)} · ${fmtTime(t.time)}</text>`,
-  )
-}
-
-// --- terminal drawing: the same rows in text.
-
-const ctxBar = (pct: number, width: number): string => {
-  const filled = Math.round((width * pct) / 100)
-  return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
-}
-
-const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
-
 // ---------------------------------------------------------------------------
-// Element builders: the band and the pane are drawn from these, both in place
-// and in the /mods hub's component catalog, so the two never drift apart.
+// Drawing: the band and the agents pane in the pack's grammar (hooks/kit), worn in the
+// skin chosen in skins. The same builders draw the /mods tab's agent rows and the
+// component catalog, so the three never drift apart.
 
-type Ui = ElementTable
+// The crab's drawing grid: 30 units wide with its props, 28 tall.
+const CRAB_BOX = 30
+const CRAB_TALL = 28
+// A list row's crab sits where a row's icon would, beside a two-line name: 24px wide.
+const ROW_CRAB = 0.8
+// The band's is one line tall.
+const BAND_CRAB = 0.7
+
 type Press = ButtonProps['onPress']
 
-// What a pane is drawn at: the desktop draws SVG rows, every other surface text rows.
-type Frame = {
-  ui: Ui
-  Svg?: ElementConstructor<SvgProps>
-  // The desktop's row width in px.
-  W: number
-  // The text bars' width in cells.
-  barW: number
-}
+// Hebrew draws every row mirrored: the crab and the name on the right, the state on the left.
+const dir = (): 'row' | 'row-reverse' => (isRtl() ? 'row-reverse' : 'row')
+const along = (): 'flex-start' | 'flex-end' => (isRtl() ? 'flex-end' : 'flex-start')
 
-const paneFrame = (ui: Ui, surface: string, columns: number): Frame => {
-  const cols = Math.max(24, columns || 40)
+// A crab as a whole SVG document, `scale` px per grid unit, facing left in Hebrew.
+const crabDoc = (costume: string, scale: number, isWalking: boolean, dim = false) => {
+  const w = Math.ceil(CRAB_BOX * scale)
+  const h = Math.ceil(CRAB_TALL * scale) + 1
   return {
-    ui,
-    Svg: surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined,
-    W: Math.max(240, Math.min(900, (columns || 40) * 8 - 8)),
-    barW: Math.max(6, Math.min(20, cols - 34)),
+    w,
+    h,
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${CRAB_CSS}${crab(0, 0, costume, dim, isWalking, scale, isRtl())}</svg>`,
   }
 }
+
+// The mod's mascot: the pixel crab on the desktop, one muted glyph on the terminal.
+const crabEl = (k: Kit, costume: string, opts: { scale?: number; walking?: boolean; dim?: boolean; key?: string } = {}): RenderElement => {
+  if (!k.vector) return text(k, '▣', opts.dim ? 'faint' : 'muted', opts.key ? { key: opts.key } : {})
+  const { Svg } = k.ui
+  const d = crabDoc(costume, opts.scale ?? ROW_CRAB, opts.walking === true, opts.dim === true)
+  return <Svg {...(opts.key ? { key: opts.key } : {})} source={d.source} alt={`${costume} crab`} width={d.w} height={d.h} />
+}
+
+const RING_R = 7
+
+// A share done as a ring with its percent and a muted label: the kit's meter in a
+// progress's colours, the accent while it runs and ok once complete (the kit's meter turns
+// warn and err as it fills, which suits context, not progress). The terminal draws a bar.
+const progressRing = (k: Kit, key: string, share: number, label?: string, tone?: KitTone): RenderElement => {
+  const { Box, Svg } = k.ui
+  const p = Math.max(0, Math.min(100, Math.round(share * 100)))
+  const shade: KitTone = tone ?? (p >= 100 ? 'ok' : 'accent')
+
+  if (!k.vector) {
+    const filled = Math.round(p / 12.5)
+    return (
+      <Box key={key} flexDirection="row" columnGap={1}>
+        {text(k, '█'.repeat(filled) + '░'.repeat(8 - filled), shade)}
+        {text(k, `${p}%`, undefined, { bold: true })}
+        {label ? text(k, label, 'muted') : null}
+      </Box>
+    )
+  }
+
+  const size = RING_R * 2 + 4
+  const c = 2 * Math.PI * RING_R
+  const ring = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${RING_R}" fill="none" stroke="${k.t.hex.muted}" stroke-opacity=".25" stroke-width="2.5"/><circle cx="${size / 2}" cy="${size / 2}" r="${RING_R}" fill="none" stroke="${hexOf(k.t, shade)}" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="${(c * p) / 100} ${c}" transform="rotate(-90 ${size / 2} ${size / 2})"/></svg>`
+  return (
+    <Box key={key} flexDirection={dir()} columnGap={1} alignItems="center">
+      <Svg source={ring} alt={`${label ?? ''} ${p}%`.trim()} width={size} height={size} />
+      {text(k, `${p}%`, undefined, { bold: true })}
+      {label ? text(k, label, 'muted') : null}
+    </Box>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The band above the prompt: the flow's percent as a ring, its title, a track of its
+// tasks, its phase as a state, the crab, and two native buttons.
+
+const TRACK_H = 6
+
+// One segment per planned task: accepted ones in the accent (ok once the flow is done),
+// ones handed to running workers in a faint accent, the rest in the hairline colour.
+// Too many tasks to tell apart, and the segments run together into one bar.
+const trackSvg = (k: Kit, f: Flow, W: number): string => {
+  const fill = f.isFinished ? k.t.hex.ok : k.t.hex.accent
+  const n = f.total
+  const handed = n ? Math.min(n, f.done + f.running) : 0
+  const rtl = isRtl()
+  const at = (x: number, w: number) => (rtl ? W - x - w : x)
+  const bar = (x: number, w: number, color: string, opacity = 1) =>
+    w > 0 ? `<rect x="${at(x, w).toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="${color}"${opacity < 1 ? ` fill-opacity="${opacity}"` : ''}/>` : ''
+  let body: string
+  if (n > 0 && W / n >= 8) {
+    const gap = 2
+    const seg = (W - gap * (n - 1)) / n
+    body = Array.from({ length: n }, (_, i) => {
+      const isDone = f.isFinished || i < f.done
+      return bar(i * (seg + gap), seg, isDone || i < handed ? fill : k.t.hex.line, isDone ? 1 : i < handed ? 0.4 : 1)
+    }).join('')
+  } else {
+    const share = ratio(f)
+    const handedShare = n ? handed / n : 0
+    body = bar(0, W, k.t.hex.line) + bar(0, W * handedShare, fill, 0.4) + bar(0, W * share, fill)
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${TRACK_H}" viewBox="0 0 ${W} ${TRACK_H}">${body}</svg>`
+}
+
+type BandProps = { f: Flow; crew: number; isWorking: boolean; onCrew: Press; onDismiss: Press; below?: unknown }
+
+// "Agents · 3": how many agents and planned tasks; a press opens or closes the pane.
+const crewLabel = (crew: number): string => `${tr().pane} · ${crew}`
+
+const crewButton = (k: Kit, crew: number, onPress: Press): RenderElement => {
+  const { Button } = k.ui
+  return <Button key="savvy-agents" label={crewLabel(crew)} dimColor onPress={onPress} />
+}
+
+// Forgets the flow, which takes the band down. The desktop draws its native close control.
+const dismissButton = (k: Kit, onPress: Press): RenderElement => {
+  const { Button } = k.ui
+  return <Button key="savvy-dismiss" label={k.vector ? tr().dismiss : '✕'} dimColor role="dismiss" onPress={onPress} />
+}
+
+const bandTree = (k: Kit, b: BandProps): RenderElement => {
+  const { Box, Svg } = k.ui
+  const { f } = b
+  const tone: KitTone = f.isFinished ? 'ok' : 'accent'
+  const word = label(f)
+  const percent = `${Math.round(ratio(f) * 100)}%`
+  const below = (b.below ?? null) as RenderElement | null
+
+  if (k.vector) {
+    // About 8 CSS px per reported column. What the ring, the state, the crab and the
+    // buttons take is fixed; the title takes up to half of the rest, the track the remainder.
+    const px = (s: string) => textWidth(s, 13)
+    const W = Math.max(240, Math.min(1600, (k.columns || 100) * 8))
+    const fixed = 18 + px(percent) + 14 + px(word) + Math.ceil(CRAB_BOX * BAND_CRAB) + px(crewLabel(b.crew)) + 28 + px(tr().dismiss) + 28 + 6 * 8
+    const room = W - fixed
+    // With room for a track the title takes at most half; without one it takes it all.
+    const half = fitText(f.title, 13, Math.max(48, Math.min(280, room * 0.5)))
+    const trackW = Math.floor(room - px(half) - 8)
+    const hasTrack = trackW >= 64
+    const title = hasTrack ? half : fitText(f.title, 13, Math.max(48, room))
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection={dir()} alignItems="center" columnGap={1}>
+          {progressRing(k, 'savvy-ring', ratio(f), undefined, tone)}
+          <Box flexShrink={1}>{text(k, title, undefined, { bold: true, wrap: 'truncate-end' })}</Box>
+          {hasTrack ? <Svg key="savvy-track" source={trackSvg(k, f, trackW)} alt={`${word}, ${percent}`} width={trackW} height={TRACK_H} /> : null}
+          <Box flexDirection={dir()} alignItems="center" columnGap={1} flexShrink={0}>
+            {status(k, word, tone)}
+            {crabEl(k, 'other', { scale: BAND_CRAB, walking: b.isWorking, key: 'savvy-crab' })}
+            {crewButton(k, b.crew, b.onCrew)}
+            {dismissButton(k, b.onDismiss)}
+          </Box>
+        </Box>
+        {below}
+      </Box>
+    )
+  }
+
+  const columns = k.columns
+  const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(columns / 3)))
+  const width = Math.max(6, Math.min(40, columns - titleW - 32))
+  return (
+    <Box flexDirection="column">
+      <Box flexDirection="row" columnGap={2}>
+        <Box width={titleW} flexShrink={0} flexDirection="row" columnGap={1}>
+          {text(k, '●', tone)}
+          {text(k, f.title, undefined, { wrap: 'truncate-end' })}
+        </Box>
+        {text(k, barText(f, width), tone)}
+        {text(k, word, undefined, { bold: true })}
+        {text(k, percent, 'muted')}
+        {crabEl(k, 'other', { walking: b.isWorking })}
+        {crewButton(k, b.crew, b.onCrew)}
+        {dismissButton(k, b.onDismiss)}
+      </Box>
+      {below}
+    </Box>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The agents pane: the flow and the totals, then the Running, Finished and Planned groups,
+// one kit row per agent.
 
 // Everything the pane shows, worked out from the session's values.
 type PaneView = {
@@ -836,7 +740,8 @@ type PaneView = {
   finished: AgentRun[]
   planned: Planned[]
   t: ReturnType<typeof totals>
-  title: string
+  // The flow while it runs; the pane's own title already says "Agents".
+  flow: Flow | null
   at: number
   isEmpty: boolean
 }
@@ -848,324 +753,240 @@ const paneView = (list: AgentRun[], f: Flow | null, at: number): PaneView => {
     finished: list.filter(a => a.status !== 'running').reverse(),
     planned,
     t: totals(list, at),
-    // The pane's title says "Agents"; inside, only the flow's own name.
-    title: f && !f.isFinished ? f.title : '',
+    flow: f && !f.isFinished ? f : null,
     at,
     isEmpty: list.length === 0 && planned.length === 0,
   }
 }
 
-const totalsSummary = (t: ReturnType<typeof totals>): string => `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${tr().tokensWord}, ${fmtTime(t.time)}`
+const totalsSummary = (t: ReturnType<typeof totals>): string => `≈${fmtCost(t.cost)} · ${fmtTokens(t.tokens)} ${tr().tokensWord} · ${fmtTime(t.time)}`
 
-const compactButton = (fr: Frame, isCompact: boolean, onPress: Press): RenderElement => {
-  const { Button } = fr.ui
-  return <Button key="compact" label={isCompact ? tr().expand : tr().collapse} plain onPress={onPress} />
+// The task's own progress when the worker reports steps; a finished run is full.
+const progressOf = (a: AgentRun): number | null => {
+  if (a.status === 'done') return 1
+  if (a.stepTotal) return Math.min(1, (a.stepDone ?? 0) / a.stepTotal)
+  return null
 }
 
-const finishedToggle = (fr: Frame, isCollapsed: boolean, count: number, onPress: Press): RenderElement => {
-  const { Button } = fr.ui
-  return <Button key="done" label={`${isCollapsed ? (isRtl() ? '◂' : '▸') : '▾'} ${tr().finished} · ${count}`} plain onPress={onPress} />
-}
+const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round((a.contextTokens / a.contextMax) * 100)) : 0)
 
-// "Running · 2", "Planned · 3": a dim heading over its rows.
-const sectionHead = (fr: Frame, key: string, text: string): RenderElement => {
-  const { Text } = fr.ui
-  return (
-    <Text key={key} dimColor>
-      {text}
-    </Text>
-  )
-}
+const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
 
-const emptyLine = (fr: Frame): RenderElement => {
-  const { Text } = fr.ui
-  return (
-    <Text key="empty" dimColor>
-      {tr().empty}
-    </Text>
-  )
-}
-
-// Desktop: the flow's name over the cost, tokens and time tiles; no name, tiles only.
-const headerTiles = (fr: Frame, title: string, t: ReturnType<typeof totals>): RenderElement => {
-  if (!fr.Svg) return totalsLine(fr, t)
-  const { Svg } = fr
-  const summary = totalsSummary(t)
-  return <Svg key="header" source={headerSvg(fr.W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={fr.W} height={headerHeight(title)} />
-}
-
-// Text surfaces: the flow's name with the collapse button at the right.
-const titleRow = (fr: Frame, title: string, compact: RenderElement): RenderElement => {
-  const { Box, Text } = fr.ui
-  return (
-    <Box key="title" flexDirection="row" justifyContent="space-between">
-      <Text bold wrap="truncate-end">
-        {title}
-      </Text>
-      {compact}
-    </Box>
-  )
-}
-
-// Text surfaces: the cost, tokens and time line.
-const totalsLine = (fr: Frame, t: ReturnType<typeof totals>): RenderElement => {
-  const { Text } = fr.ui
-  return (
-    <Text key="totals" dimColor>
-      ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {tr().tokensWord} · {fmtTime(t.time)}
-    </Text>
-  )
-}
-
-// The dotted grid behind the desktop pane, stacked from tiles the engine accepts.
-const gridBackdrop = (fr: Frame, gridH: number): RenderElement[] => {
-  const { Svg } = fr
-  if (!Svg) return []
-  return gridTiles(gridH).map((tileH, i) => <Svg key={`grid-${i}`} source={gridSvg(fr.W, tileH)} alt="dotted grid" width={fr.W} height={tileH} />)
-}
-
-// Text rows' parts: the crab glyph, the name and the status; the tier and model; the bar and stats.
-const termRowTitle = (fr: Frame, a: AgentRun): RenderElement => {
-  const { Box, Text } = fr.ui
-  const color = colorOf(tierOf(a.type))
-  return (
-    <Box flexDirection="row" gap={1}>
-      <Text color={color}>▣</Text>
-      <Text bold wrap="truncate-end">
-        {a.description || a.type}
-      </Text>
-      <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
-    </Box>
-  )
-}
-
-const termBadge = (fr: Frame, a: AgentRun): RenderElement => {
-  const { Text } = fr.ui
-  const tier = tierOf(a.type)
-  return (
-    <Text dimColor wrap="truncate-end">
-      {'  '}
-      {tier === 'other' ? a.type : tierWord(tier)} · {runModel(a)}
-      {a.round > 1 ? ` · ${tr().round} ${a.round}` : ''}
-    </Text>
-  )
-}
-
-const termBar = (fr: Frame, a: AgentRun): RenderElement => {
-  const { Text } = fr.ui
-  const progress = progressOf(a)
-  return progress === null ? <Text dimColor>{ctxBar(ctxOf(a), fr.barW)}</Text> : <Text color={colorOf(tierOf(a.type))}>{ctxBar(progress * 100, fr.barW)}</Text>
-}
-
-const termSteps = (a: AgentRun): string => (a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : '')
-
-const termStats = (a: AgentRun, at: number): string => `${tr().ctx} ${ctxOf(a)}% · ${fmtTokens(a.contextTokens)} ≈${fmtCost(a.costUsd)} ${fmtTime(elapsed(a, at))}`
-
-const termProgress = (fr: Frame, a: AgentRun, at: number): RenderElement => {
-  const { Text } = fr.ui
-  return (
-    <Text wrap="truncate-end">
-      {'  '}
-      {termBar(fr, a)}
-      <Text dimColor>
-        {' '}
-        {termSteps(a)}
-        {termStats(a, at)}
-      </Text>
-    </Text>
-  )
-}
-
-// One subagent: an SVG row on the desktop, three text lines elsewhere.
-const agentRow = (fr: Frame, a: AgentRun, at: number): RenderElement => {
+// A run's state as a word and its tone: running in the accent, finished ok, failed err.
+const stateOf = (st: string): [word: string, tone: KitTone] => {
   const s = tr()
-  const { Box } = fr.ui
-  if (fr.Svg) {
-    const { Svg } = fr
-    const word = a.status === 'running' ? s.isRunning : s.isFinished
-    return <Svg key={a.id} source={agentSvg(fr.W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${word}`} width={fr.W} height={66} />
-  }
+  if (st === 'running') return [s.isRunning, 'accent']
+  if (st === 'done') return [s.isFinished, 'ok']
+  if (st === 'failed') return [s.failed, 'err']
+  return [s.isPlanned, 'muted']
+}
+
+// "careful · Opus 5.5 · high · round 2": the tier (a subagent's own type outside the
+// savvy tiers), the model and effort, and the round when a task went out again.
+const runMeta = (a: AgentRun): string => {
+  const tier = tierOf(a.type)
+  return [tier === 'other' ? a.type : tierWord(tier), runModel(a), a.round > 1 ? `${tr().round} ${a.round}` : ''].filter(Boolean).join(' · ')
+}
+
+const plannedTier = (p: PlannedTask): string => (p.tier in TIER_COLOR ? p.tier : 'other')
+
+const plannedMeta = (p: Planned): string => {
+  const tier = plannedTier(p)
+  return [tierWord(tier), tierModel(tier), p.after.length ? `${tr().after} ${p.after.join(', ')}` : ''].filter(Boolean).join(' · ')
+}
+
+// "3/5 · covering edge cases": the worker's reported steps and note.
+const stepsText = (a: AgentRun): string => (a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : '')
+
+const costTime = (a: AgentRun, at: number): string => `≈${fmtCost(a.costUsd)} · ${fmtTime(elapsed(a, at))}`
+
+// A list row in the kit's row grammar: the crab where a row's icon sits, the name over its
+// muted meta line, the state at the end; readings follow under the name. `pad` is 0 where
+// the row is handed to the /mods hub, which pads its items itself.
+const listRow = (k: Kit, key: string, lead: RenderElement, name: RenderElement, meta: string, end: RenderElement, below: (RenderElement | null)[], pad = 1): RenderElement => {
+  const { Box } = k.ui
   return (
-    <Box key={a.id} flexDirection="column" marginBottom={1}>
-      {termRowTitle(fr, a)}
-      {termBadge(fr, a)}
-      {termProgress(fr, a, at)}
+    <Box key={key} flexDirection="column" paddingX={pad} hover={{ backgroundColor: k.t.ink.hover }}>
+      <Box flexDirection={dir()} columnGap={1} alignItems="flex-start">
+        {lead}
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} alignItems={along()}>
+          {name}
+          {text(k, meta, 'muted', { wrap: 'truncate-end' })}
+          {below.filter(Boolean)}
+        </Box>
+        <Box flexShrink={0}>{end}</Box>
+      </Box>
     </Box>
   )
 }
 
-// A task the flow planned that no run has picked up yet, dimmed.
-const plannedRow = (fr: Frame, pl: Planned): RenderElement => {
-  const { Box, Text } = fr.ui
-  if (fr.Svg) {
-    const { Svg } = fr
-    return <Svg key={`plan-${pl.n}`} source={plannedSvg(fr.W, pl)} alt={`${pl.n}. ${pl.title}: ${tr().isPlanned}`} width={fr.W} height={46} />
-  }
-  const tier = pl.tier in TIER_COLOR ? pl.tier : 'other'
+// The worker's steps as a ring and the step it is on; nothing when it reports none.
+const agentSteps = (k: Kit, a: AgentRun): RenderElement | null => {
+  const progress = progressOf(a)
+  if (!a.stepTotal || progress === null) return null
+  return progressRing(k, `steps-${a.id}`, progress, stepsText(a), a.status === 'failed' ? 'muted' : undefined)
+}
+
+// Context as the kit's ring (warn past 80%, err past 95%), then the estimated cost and time.
+const agentStats = (k: Kit, a: AgentRun, at: number): RenderElement => {
+  const { Box } = k.ui
   return (
-    <Box key={`plan-${pl.n}`} flexDirection="column" marginBottom={1}>
-      <Text dimColor wrap="truncate-end">
-        <Text color={colorOf(tier)}>▢</Text> {pl.n}. {pl.title} ◷
-      </Text>
-      <Text dimColor wrap="truncate-end">
-        {'  '}
-        {tierWord(tier)} · {tierModel(tier)}
-        {pl.after.length ? ` · ${tr().after} ${pl.after.join(', ')}` : ''}
-      </Text>
+    <Box key={`stats-${a.id}`} flexDirection={dir()} columnGap={2} alignItems="center" flexWrap="wrap">
+      {meter(k, `ctx-${a.id}`, tr().context, ctxOf(a), fmtTokens(a.contextTokens))}
+      {text(k, costTime(a, at), 'muted')}
     </Box>
   )
 }
 
-// The collapsed pane: one crab (or glyph) per agent and the totals.
-const compactRow = (fr: Frame, v: PaneView): RenderElement => {
-  const { Text } = fr.ui
-  const list = [...v.running, ...v.finished]
-  if (fr.Svg) {
-    const { Svg } = fr
-    return <Svg key="compact-row" source={compactSvg(fr.W, list, v.planned, v.t)} alt={`${list.length} ${tr().agentsCount}, ${totalsSummary(v.t)}`} width={fr.W} height={32} />
-  }
+// One subagent.
+const agentRow = (k: Kit, a: AgentRun, at: number, pad = 1): RenderElement => {
+  const [word, tone] = stateOf(a.status)
+  return listRow(
+    k,
+    `agent-${a.id}`,
+    crabEl(k, costumeOf(a.type), { walking: a.status === 'running' }),
+    text(k, a.description || a.type, undefined, { wrap: 'truncate-end' }),
+    runMeta(a),
+    status(k, word, tone),
+    [agentSteps(k, a), agentStats(k, a, at)],
+    pad,
+  )
+}
+
+// A task the flow planned that no run has picked up yet: a dim crab, muted text.
+const plannedRow = (k: Kit, pl: Planned, pad = 1): RenderElement =>
+  listRow(
+    k,
+    `plan-${pl.n}`,
+    crabEl(k, plannedTier(pl), { dim: true }),
+    text(k, `${pl.n}. ${pl.title}`, 'muted', { wrap: 'truncate-end' }),
+    plannedMeta(pl),
+    status(k, tr().isPlanned, 'muted'),
+    [],
+    pad,
+  )
+
+// A group's title with its count at the right, and a control after it where there is one.
+const head = (k: Kit, key: string, title: string, detail: string, end?: RenderElement): RenderElement => {
+  const { Box } = k.ui
   return (
-    <Text key="compact-row" wrap="truncate-end">
-      {list.map(a => (
-        <Text key={a.id} color={colorOf(tierOf(a.type))}>
-          {STATUS_GLYPH[a.status]}{' '}
-        </Text>
-      ))}
-      {v.planned.map(pl => (
-        <Text key={`plan-${pl.n}`} dimColor>
-          ◷{' '}
-        </Text>
-      ))}
-    </Text>
+    <Box key={key} flexDirection={dir()} columnGap={2} paddingX={1} alignItems="center">
+      <Box flexGrow={1} flexShrink={1} flexDirection={dir()}>
+        {text(k, title, undefined, { bold: true })}
+      </Box>
+      {text(k, detail, 'muted')}
+      {end ?? null}
+    </Box>
+  )
+}
+
+const listSection = (k: Kit, key: string, heading: RenderElement, rows: RenderElement[]): RenderElement => {
+  const { Box } = k.ui
+  return (
+    <Box key={`sec-${key}`} flexDirection="column">
+      {heading}
+      {group(k, key, rows)}
+    </Box>
+  )
+}
+
+const compactButton = (k: Kit, isCompact: boolean, onPress: Press): RenderElement => {
+  const { Button } = k.ui
+  return <Button key="compact" label={isCompact ? tr().expand : tr().collapse} dimColor onPress={onPress} />
+}
+
+// The Finished group's head: its count and the button that hides or shows its rows.
+const finishedToggle = (k: Kit, isCollapsed: boolean, count: number, onPress: Press): RenderElement => {
+  const { Button } = k.ui
+  return head(k, 'h-done', tr().finished, String(count), <Button key="done" label={isCollapsed ? tr().show : tr().hide} dimColor onPress={onPress} />)
+}
+
+const totalsLine = (k: Kit, t: ReturnType<typeof totals>): RenderElement => text(k, totalsSummary(t), 'muted', { key: 'totals' })
+
+// At the top: the running flow's name and its progress ring, then the totals and Collapse.
+const paneHeader = (k: Kit, v: PaneView, compact: RenderElement | null): RenderElement => {
+  const { Box } = k.ui
+  return (
+    <Box key="header" flexDirection="column" paddingX={1}>
+      {v.flow ? (
+        <Box flexDirection={dir()} columnGap={2} alignItems="center">
+          <Box flexGrow={1} flexShrink={1} flexDirection={dir()}>
+            {text(k, v.flow.title, undefined, { bold: true, wrap: 'truncate-end' })}
+          </Box>
+          {progressRing(k, 'flow-ring', ratio(v.flow), label(v.flow))}
+        </Box>
+      ) : null}
+      <Box flexDirection={dir()} columnGap={2} alignItems="center">
+        <Box flexGrow={1} flexShrink={1} flexDirection={dir()}>
+          {totalsLine(k, v.t)}
+        </Box>
+        {compact}
+      </Box>
+    </Box>
+  )
+}
+
+// One crab slot of the collapsed row, in px.
+const SLOT = 30
+
+// The collapsed pane: one crab per agent with its state's dot, planned ones dim, the rest as +N.
+const compactRow = (k: Kit, v: PaneView): RenderElement => {
+  const { Box, Svg } = k.ui
+  const items = [
+    ...[...v.running, ...v.finished].map(a => ({ costume: costumeOf(a.type), status: a.status as string, dim: false })),
+    ...v.planned.map(p => ({ costume: plannedTier(p), status: 'planned', dim: true })),
+  ]
+  if (!k.vector) {
+    return (
+      <Box key="compact-row" flexDirection="row" flexWrap="wrap" columnGap={1}>
+        {items.map((it, i) => text(k, STATUS_GLYPH[it.status] ?? '◷', stateOf(it.status)[1], { key: `c-${i}` }))}
+      </Box>
+    )
+  }
+  const W = Math.max(120, (k.columns || 40) * 8 - 32)
+  const fit = Math.max(1, Math.floor((W - 40) / SLOT))
+  const shown = items.slice(0, fit)
+  const more = items.length - shown.length
+  const w = Math.max(SLOT, shown.length * SLOT)
+  const tall = Math.ceil(CRAB_TALL * ROW_CRAB) + 1
+  const body = shown
+    .map((it, i) => {
+      const x = isRtl() ? w - (i + 1) * SLOT : i * SLOT
+      return `${crab(x, 0, it.costume, it.dim, it.status === 'running', ROW_CRAB, isRtl())}<circle cx="${x + SLOT - 4}" cy="4" r="3" fill="${hexOf(k.t, stateOf(it.status)[1])}"/>`
+    })
+    .join('')
+  return (
+    <Box key="compact-row" flexDirection={dir()} columnGap={1} alignItems="center">
+      <Svg source={`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${tall}" viewBox="0 0 ${w} ${tall}">${CRAB_CSS}${body}</svg>`} alt={`${items.length} ${tr().agentsCount}`} width={w} height={tall} />
+      {more ? text(k, `+${more}`, 'muted') : null}
+    </Box>
   )
 }
 
 // The whole agents pane.
-const paneTree = (fr: Frame, v: PaneView, p: Panel, onCompact: Press, onDone: Press): RenderElement => {
+const paneTree = (k: Kit, v: PaneView, p: Panel, onCompact: Press, onDone: Press): RenderElement => {
   const s = tr()
-  const { Box } = fr.ui
-  const compact = compactButton(fr, p.isCompact, onCompact)
-  const done = finishedToggle(fr, p.isDoneCollapsed, v.finished.length, onDone)
+  const { Box } = k.ui
   const { running, finished, planned } = v
+  // Nothing to fold while the pane is empty: the header carries no Collapse then.
+  const parts: (RenderElement | null)[] = [paneHeader(k, v, v.isEmpty ? null : compactButton(k, p.isCompact, onCompact))]
 
-  if (fr.Svg) {
-    // In Hebrew the column hugs the right edge: section heads and buttons right-aligned.
-    const align = isRtl() ? 'flex-end' : undefined
-    if (p.isCompact) {
-      return (
-        <Box flexDirection="column" gap={1} alignItems={align}>
-          {compactRow(fr, v)}
-          {compact}
-        </Box>
-      )
+  if (v.isEmpty) {
+    parts.push(empty(k, 'empty', s.empty, s.emptyHint))
+  } else if (p.isCompact) {
+    parts.push(group(k, 'compact', [compactRow(k, v)]))
+  } else {
+    if (running.length > 0) parts.push(listSection(k, 'running', head(k, 'h-run', s.running, String(running.length)), running.map(a => agentRow(k, a, v.at))))
+    if (finished.length > 0) {
+      const toggle = finishedToggle(k, p.isDoneCollapsed, finished.length, onDone)
+      parts.push(p.isDoneCollapsed ? <Box key="sec-finished" flexDirection="column">{toggle}</Box> : listSection(k, 'finished', toggle, finished.map(a => agentRow(k, a, v.at))))
     }
-    const shownDone = p.isDoneCollapsed ? 0 : finished.length
-    const lines = 1 + (v.isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-    const gridH = headerHeight(v.title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
-    return (
-      <Box flexDirection="column">
-        {/* The grid sizes the pane; the content is placed over it, as an
-            absolute Box paints over the siblings before it. */}
-        {gridBackdrop(fr, gridH)}
-        <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
-          {headerTiles(fr, v.title, v.t)}
-          {compact}
-          {v.isEmpty && emptyLine(fr)}
-          {running.length > 0 && sectionHead(fr, 'h-run', `${s.running} · ${running.length}`)}
-          {running.map(a => agentRow(fr, a, v.at))}
-          {finished.length > 0 && done}
-          {!p.isDoneCollapsed && finished.map(a => agentRow(fr, a, v.at))}
-          {planned.length > 0 && sectionHead(fr, 'h-plan', `${s.planned} · ${planned.length}`)}
-          {planned.map(pl => plannedRow(fr, pl))}
-        </Box>
-      </Box>
-    )
+    if (planned.length > 0) parts.push(listSection(k, 'planned', head(k, 'h-plan', s.planned, String(planned.length)), planned.map(pl => plannedRow(k, pl))))
   }
 
   return (
-    <Box flexDirection="column">
-      {titleRow(fr, v.title, compact)}
-      {totalsLine(fr, v.t)}
-      {p.isCompact ? (
-        compactRow(fr, v)
-      ) : (
-        <Box flexDirection="column" marginTop={1}>
-          {v.isEmpty && emptyLine(fr)}
-          {running.length > 0 && sectionHead(fr, 'h-run', `${s.running} · ${running.length}`)}
-          {running.map(a => agentRow(fr, a, v.at))}
-          {finished.length > 0 && done}
-          {!p.isDoneCollapsed && finished.map(a => agentRow(fr, a, v.at))}
-          {planned.length > 0 && sectionHead(fr, 'h-plan', `${s.planned} · ${planned.length}`)}
-          {planned.map(pl => plannedRow(fr, pl))}
-        </Box>
-      )}
-    </Box>
-  )
-}
-
-// --- the band above the prompt
-
-// "×3": how many agents and planned tasks; a press opens or closes the pane.
-const crewButton = (ui: Ui, crew: number, onPress: Press): RenderElement => {
-  const { Button } = ui
-  return <Button key="savvy-agents" label={`×${crew}`} plain onPress={onPress} />
-}
-
-// ✕: forgets the flow, which takes the band down.
-const dismissButton = (ui: Ui, onPress: Press): RenderElement => {
-  const { Button } = ui
-  return <Button key="savvy-dismiss" label="✕" plain role="dismiss" onPress={onPress} />
-}
-
-// The band's crab on a text surface: one glyph in the clay colour.
-const termCrab = (ui: Ui): RenderElement => {
-  const { Text } = ui
-  return <Text color={CLAY}>▣</Text>
-}
-
-type BandProps = { f: Flow; crew: number; isWorking: boolean; onCrew: Press; onDismiss: Press; below?: unknown }
-
-// The whole band: one SVG row and two buttons on remote surfaces, text cells in the terminal.
-const bandTree = (ui: Ui, surface: string, columns: number, b: BandProps): RenderElement => {
-  const { Box, Text } = ui
-  const { f } = b
-  const percent = `${Math.round(ratio(f) * 100)}%`
-  const below = (b.below ?? null) as RenderElement | null
-  // The terminal's element table is completed with an `Svg` that draws nothing: test the surface too.
-  if (surface !== 'terminal' && 'Svg' in ui) {
-    const { Svg } = ui
-    // About 8 CSS px per reported column; the rest is the count, the dismiss
-    // and their gaps. No floor above the slot: a row wider than it would wrap.
-    const width = Math.max(180, Math.min(1600, (columns || 100) * 8 - 96))
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-          <Svg source={rowSvg(f, width, b.isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
-          {crewButton(ui, b.crew, b.onCrew)}
-          {dismissButton(ui, b.onDismiss)}
-        </Box>
-        {below}
-      </Box>
-    )
-  }
-
-  const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(columns / 3)))
-  const width = Math.max(6, Math.min(40, columns - titleW - 32))
-  return (
-    <Box flexDirection="column">
-      <Box flexDirection="row" gap={2}>
-        <Box width={titleW} flexShrink={0}>
-          <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
-          <Text wrap="truncate-end">{f.title}</Text>
-        </Box>
-        <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
-        <Text bold>{label(f)}</Text>
-        <Text dimColor>{percent}</Text>
-        {termCrab(ui)}
-        {crewButton(ui, b.crew, b.onCrew)}
-        {dismissButton(ui, b.onDismiss)}
-      </Box>
-      {below}
+    <Box flexDirection="column" rowGap={1}>
+      {parts.filter(Boolean)}
     </Box>
   )
 }
@@ -1196,14 +1017,104 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// The /mods hub's tab (claude-mods-hub PROTOCOL.md): what the mod tracks, a button
-// that opens the agents pane, and the mod's two settings. It speaks the hub's
-// language (English or Portuguese), not the pane's.
+// Settings. The two userConfig settings live in their config rows and the pane's two view
+// choices in the store: both are the user's, shared by every session. The atoms only carry
+// them between draws of one session, so they are read again before each /mods panel and
+// on a slow clock, and another session's change shows here within seconds.
+
+// The mod's userConfig fields the hub's Settings section changes, each a choice.
+const SETTINGS = {
+  language: { values: ['auto', 'en', 'ru', 'he'], fallback: 'auto' },
+  autoOpen: { values: ['savvy', 'any'], fallback: 'savvy' },
+} as const
+
+type Setting = keyof typeof SETTINGS
+
+const isSetting = (id: string): id is Setting => Object.hasOwn(SETTINGS, id)
+
+type ConfigRow = { key: string; value?: unknown }
+
+async function configRows($: EngineInterface): Promise<readonly ConfigRow[]> {
+  try {
+    return (await $.config.list()) as readonly ConfigRow[]
+  } catch {
+    // No config menu here: the activation's options stand.
+    return []
+  }
+}
+
+// The setting as stored now, else the options `register` got, else its default.
+const settingFrom = (rows: readonly ConfigRow[], options: PluginOptions, id: Setting): string => {
+  const { values, fallback } = SETTINGS[id]
+  const known = (v: unknown): v is string => typeof v === 'string' && (values as readonly string[]).includes(v)
+  const row = rows.find(r => r.key === `savvy-progress.${id}`)
+  if (known(row?.value)) return row.value
+  return known(options[id]) ? options[id] : fallback
+}
+
+const prefsFrom = (rows: readonly ConfigRow[], options: PluginOptions): Prefs => ({
+  language: settingFrom(rows, options, 'language'),
+  autoOpen: settingFrom(rows, options, 'autoOpen'),
+})
+
+// The pane's view choices: the store key, the panel field it mirrors.
+const VIEW = {
+  compact: 'isCompact',
+  hideFinished: 'isDoneCollapsed',
+} as const
+
+type ViewChoice = keyof typeof VIEW
+
+const isViewChoice = (id: string): id is ViewChoice => Object.hasOwn(VIEW, id)
+
+async function storedView($: EngineInterface): Promise<Partial<Pick<Panel, 'isCompact' | 'isDoneCollapsed'>>> {
+  const out: Partial<Pick<Panel, 'isCompact' | 'isDoneCollapsed'>> = {}
+  for (const id of Object.keys(VIEW) as ViewChoice[]) {
+    try {
+      const value = await $.store.get(id)
+      if (typeof value === 'boolean') out[VIEW[id]] = value
+    } catch {
+      // No store here: the session's own choice stands.
+    }
+  }
+  return out
+}
+
+// Writes a view choice to the user's store at once, and to this session's atom.
+async function setView($: EngineInterface, id: ViewChoice, on: boolean): Promise<void> {
+  await update($, panel, prev => ({ ...prev, [VIEW[id]]: on }))
+  try {
+    await $.store.set(id, on)
+  } catch {
+    // No store here: the choice holds for this session.
+  }
+}
+
+// Reads the user's settings again; an atom changes only when its stored value did.
+async function syncSettings($: EngineInterface, options: PluginOptions): Promise<void> {
+  const next = prefsFrom(await configRows($), options)
+  const was = await read($, prefs)
+  if (!was || was.language !== next.language || was.autoOpen !== next.autoOpen) {
+    await update($, prefs, () => next)
+    if (!was || was.language !== next.language) lang = await detectLang($, next.language)
+  }
+  const view = await storedView($)
+  const p = await read($, panel)
+  if ((view.isCompact !== undefined && view.isCompact !== p.isCompact) || (view.isDoneCollapsed !== undefined && view.isDoneCollapsed !== p.isDoneCollapsed)) {
+    await update($, panel, prev => ({ ...prev, ...view }))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The /mods hub's tab (claude-mods-hub PROTOCOL.md): this session's flow and agents, the
+// agents themselves as rows, the panel's view choices, and the mod's two settings. It
+// speaks the hub's language (English or Portuguese); the rows speak the pane's.
 
 const HUB = {
   en: {
     title: 'Agents',
-    overview: 'Overview',
+    overview: 'This session',
+    view: 'Agents panel',
     settings: 'Settings',
     nRunning: (n: number) => `${n} running`,
     nDone: (n: number) => `${n} done`,
@@ -1223,13 +1134,20 @@ const HUB = {
     review: 'review',
     flowDone: 'done',
     busy: 'running',
-    open: 'Open the agents panel',
+    more: (n: number) => `${n} more in the agents panel.`,
+    open: 'Open panel',
     openHelp: 'Running, finished and planned subagents with model, task progress, context, cost and time.',
     opened: 'Agents panel opened.',
+    compact: 'Collapsed view',
+    compactHelp: 'The panel shows one row of crabs and the totals instead of the full list.',
+    hideFinished: 'Hide finished agents',
+    hideFinishedHelp: 'Folds the Finished group away; running and planned agents stay listed.',
+    on: 'on',
+    off: 'off',
     language: 'Panel language',
-    languageHelp: "The agents pane and the progress bar. Auto follows Claude Code's language, then the system locale.",
+    languageHelp: "For the agents panel and the progress bar. Auto follows Claude Code's language, then the system locale.",
     autoOpen: 'Open the panel by itself',
-    autoOpenHelp: 'When a savvy-flow worker starts or a plan is reported; with any subagent, also once per session when any other one starts.',
+    autoOpenHelp: 'When a savvy-flow worker starts or a plan is reported; with any subagent, also once per session when another one starts.',
     auto: 'Auto',
     savvy: 'savvy-flow',
     any: 'Any subagent',
@@ -1239,7 +1157,8 @@ const HUB = {
   },
   pt: {
     title: 'Agentes',
-    overview: 'Visão geral',
+    overview: 'Esta sessão',
+    view: 'Painel de agentes',
     settings: 'Ajustes',
     nRunning: (n: number) => `${n} em execução`,
     nDone: (n: number) => `${n} ${n === 1 ? 'concluído' : 'concluídos'}`,
@@ -1259,11 +1178,18 @@ const HUB = {
     review: 'revisão',
     flowDone: 'concluído',
     busy: 'em execução',
-    open: 'Abrir o painel de agentes',
+    more: (n: number) => `Mais ${n} no painel de agentes.`,
+    open: 'Abrir painel',
     openHelp: 'Subagentes em execução, concluídos e planejados, com modelo, progresso da tarefa, contexto, custo e tempo.',
     opened: 'Painel de agentes aberto.',
+    compact: 'Visão recolhida',
+    compactHelp: 'O painel mostra uma linha de caranguejos e os totais em vez da lista completa.',
+    hideFinished: 'Ocultar agentes concluídos',
+    hideFinishedHelp: 'Recolhe o grupo de concluídos; os agentes em execução e planejados continuam na lista.',
+    on: 'ligado',
+    off: 'desligado',
     language: 'Idioma do painel',
-    languageHelp: 'O painel de agentes e a barra de progresso. Automático segue o idioma do Claude Code e depois o do sistema.',
+    languageHelp: 'Para o painel de agentes e a barra de progresso. Automático segue o idioma do Claude Code e depois o do sistema.',
     autoOpen: 'Abrir o painel sozinho',
     autoOpenHelp: 'Quando um worker do savvy-flow começa ou um plano é informado; com qualquer subagente, também uma vez por sessão quando outro começa.',
     auto: 'Automático',
@@ -1284,34 +1210,10 @@ const hubOf = (l: unknown): Hub => (l === 'pt' ? HUB.pt : HUB.en)
 // Module scope is fine: the hub asks for a panel before it shows a button to press.
 let hubLang: SavvyLang = 'en'
 
-// The mod's userConfig fields the hub's Settings section changes, each a choice.
-const SETTINGS = {
-  language: { values: ['auto', 'en', 'ru', 'he'], fallback: 'auto' },
-  autoOpen: { values: ['savvy', 'any'], fallback: 'savvy' },
-} as const
-
-type Setting = keyof typeof SETTINGS
-
-const isSetting = (id: string): id is Setting => Object.hasOwn(SETTINGS, id)
-
-const settingLabel = (h: Hub, id: Setting): string => (id === 'language' ? h.language : h.autoOpen)
+const settingLabel = (h: Hub, id: Setting | ViewChoice): string => ({ language: h.language, autoOpen: h.autoOpen, compact: h.compact, hideFinished: h.hideFinished })[id]
 
 const optionLabel = (h: Hub, value: string): string =>
   ({ auto: h.auto, en: 'English', ru: 'Русский', he: 'עברית', savvy: h.savvy, any: h.any })[value] ?? value
-
-// The setting as stored now. The options `register` got are this activation's, and a
-// change reloads the module: the hub draws again before that, so read the config row.
-async function settingOf($: EngineInterface, options: PluginOptions, id: Setting): Promise<string> {
-  const { values, fallback } = SETTINGS[id]
-  const known = (v: unknown): v is string => typeof v === 'string' && (values as readonly string[]).includes(v)
-  try {
-    const row = (await $.config.list()).find(r => r.key === `savvy-progress.${id}`)
-    if (known(row?.value)) return row.value
-  } catch {
-    // No config menu here: the activation's options stand.
-  }
-  return known(options[id]) ? options[id] : fallback
-}
 
 // "tasks 1/4 · 25%", in the hub's language.
 const flowProgress = (h: Hub, f: Flow): string => {
@@ -1322,23 +1224,31 @@ const flowProgress = (h: Hub, f: Flow): string => {
   return f.total ? `${word} ${f.done}/${f.total} · ${Math.round(ratio(f) * 100)}%` : `${word}: ${f.running} ${h.busy}`
 }
 
+// The finished agents the tab lists as rows; the panel lists them all.
+const HUB_FINISHED = 8
+
 async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: PluginOptions): Promise<SavvyPanel> {
   hubLang = args.lang === 'pt' ? 'pt' : 'en'
   const h = hubOf(hubLang)
+  await syncSettings($, options)
+  const pr = (await read($, prefs)) ?? prefsFrom([], options)
+  const view = await read($, panel)
   const list = await read($, agents)
   const f = await read($, flow)
   const at = Math.max(await $.clock.now(), ...list.map(a => a.startedAt), 0)
-  const running = list.filter(a => a.status === 'running').length
-  const finished = list.length - running
+  const v = paneView(list, f, at)
+  const running = v.running.length
+  const finished = v.finished.length
   const failed = list.filter(a => a.status === 'failed').length
-  const planned = plannedOf(f, list).length
-  const t = totals(list, at)
+  const planned = v.planned.length
   const isFlowLive = f !== null && !f.isFinished
 
   const counts = [running ? h.nRunning(running) : '', finished ? h.nDone(finished) : '', planned ? h.nPlanned(planned) : ''].filter(Boolean)
   const summary = [isFlowLive ? `${f.title}: ${flowProgress(h, f)}` : '', counts.length ? counts.join(' · ') : h.none].filter(Boolean).join(' · ')
 
-  const overview: SavvyItem[] = [
+  const overview: SavvyItem[] = []
+  if (f !== null) overview.push({ kind: 'info', label: h.flow, value: `${f.title}: ${flowProgress(h, f)}`, tone: f.isFinished ? 'ok' : 'accent' })
+  overview.push(
     { kind: 'info', label: h.running, value: String(running), tone: running ? 'accent' : 'muted' },
     {
       kind: 'info',
@@ -1347,28 +1257,42 @@ async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: Plugin
       ...(failed ? { tone: 'warn' as const } : finished ? {} : { tone: 'muted' as const }),
     },
     { kind: 'info', label: h.planned, value: String(planned), ...(planned ? {} : { tone: 'muted' as const }) },
-  ]
-  if (f !== null) overview.push({ kind: 'info', label: h.flow, value: `${f.title}: ${flowProgress(h, f)}`, tone: f.isFinished ? 'ok' : 'accent' })
+  )
   if (list.length) {
     overview.push(
-      { kind: 'info', label: h.cost, value: `≈${fmtCost(t.cost)}` },
-      { kind: 'info', label: h.tokens, value: fmtTokens(t.tokens) },
-      { kind: 'info', label: h.time, value: fmtTime(t.time) },
+      { kind: 'info', label: h.cost, value: `≈${fmtCost(v.t.cost)}` },
+      { kind: 'info', label: h.tokens, value: fmtTokens(v.t.tokens) },
+      { kind: 'info', label: h.time, value: fmtTime(v.t.time) },
     )
   }
-  overview.push({ kind: 'action', id: 'open', label: h.open, help: h.openHelp, primary: true })
 
-  const settings: SavvyItem[] = []
-  for (const id of Object.keys(SETTINGS) as Setting[]) {
-    settings.push({
-      kind: 'choice',
-      id,
-      label: settingLabel(h, id),
-      help: id === 'language' ? h.languageHelp : h.autoOpenHelp,
-      value: await settingOf($, options, id),
-      options: SETTINGS[id].values.map(value => ({ value, label: optionLabel(h, value) })),
-    })
+  // The agents themselves, as the pane draws them: plain data, one row per item.
+  const k = kitOf($.ui.resolve({ surface: args.surface, component: 'Pane' }) as unknown as KitUi, toneOf(await skinOf($)), args.surface, Math.max(24, args.columns - 4))
+  const tree = (el: RenderElement): SavvyItem => ({ kind: 'tree', tree: staticTree(el) })
+  const lists: SavvySection[] = []
+  if (running) lists.push({ id: 'running', title: `${h.running} · ${running}`, items: v.running.map(a => tree(agentRow(k, a, at, 0))) })
+  if (finished) {
+    const items = v.finished.slice(0, HUB_FINISHED).map(a => tree(agentRow(k, a, at, 0)))
+    if (finished > HUB_FINISHED) items.push({ kind: 'text', text: h.more(finished - HUB_FINISHED) })
+    lists.push({ id: 'finished', title: `${h.finished} · ${finished}`, items })
   }
+  if (planned) lists.push({ id: 'planned', title: `${h.planned} · ${planned}`, items: v.planned.map(pl => tree(plannedRow(k, pl, 0))) })
+
+  const viewItems: SavvyItem[] = [
+    { kind: 'action', id: 'open', label: h.open, help: h.openHelp, primary: true, scope: 'session' },
+    { kind: 'toggle', id: 'compact', label: h.compact, help: h.compactHelp, value: view.isCompact, scope: 'user' },
+    { kind: 'toggle', id: 'hideFinished', label: h.hideFinished, help: h.hideFinishedHelp, value: view.isDoneCollapsed, scope: 'user' },
+  ]
+
+  const settings: SavvyItem[] = (Object.keys(SETTINGS) as Setting[]).map(id => ({
+    kind: 'choice',
+    id,
+    label: settingLabel(h, id),
+    help: id === 'language' ? h.languageHelp : h.autoOpenHelp,
+    value: pr[id],
+    options: SETTINGS[id].values.map(value => ({ value, label: optionLabel(h, value) })),
+    scope: 'user',
+  }))
 
   return {
     title: h.title,
@@ -1376,6 +1300,8 @@ async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: Plugin
     ...(running ? { tone: 'accent' as const } : failed ? { tone: 'warn' as const } : {}),
     sections: [
       { id: 'overview', title: h.overview, items: overview },
+      ...lists,
+      { id: 'view', title: h.view, items: viewItems },
       { id: 'settings', title: h.settings, items: settings },
     ],
     // The counts and clocks move while agents run: the hub draws the tab again.
@@ -1389,14 +1315,21 @@ async function actOn($: EngineInterface, args: SavvyActArgs): Promise<SavvyActRe
     await openPane($)
     return { message: h.opened }
   }
+  if (isViewChoice(args.id)) {
+    if (args.value !== 'on' && args.value !== 'off') return { message: h.badValue(args.value ?? '') }
+    await setView($, args.id, args.value === 'on')
+    return { message: h.set(settingLabel(h, args.id), args.value === 'on' ? h.on : h.off) }
+  }
   if (!isSetting(args.id)) return { message: h.unknown(args.id) }
   const value = args.value ?? ''
   if (!(SETTINGS[args.id].values as readonly string[]).includes(value)) return { message: h.badValue(value) }
   const written = await $.config.set({ key: `savvy-progress.${args.id}`, value })
   if (written.deny !== undefined) return { message: written.deny }
-  // The pane and the band follow at once; the reload the change brings sets it again.
-  if (args.id === 'language') lang = await detectLang($, value)
-  return { message: h.set(settingLabel(h, args.id), optionLabel(h, value)) }
+  // The pane and the band follow at once; the reload the change brings reads it again.
+  const id = args.id
+  await update($, prefs, prev => ({ ...(prev ?? { language: 'auto', autoOpen: 'savvy' }), [id]: value }))
+  if (id === 'language') lang = await detectLang($, value)
+  return { message: h.set(settingLabel(h, id), optionLabel(h, value)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1470,176 +1403,6 @@ const inLang = <T,>(l: Lang, draw: () => T): T => {
   }
 }
 
-type Words = { name: string; help: string }
-
-const CATALOG: Record<SavvyLang, { desktopOnly: string; entries: Record<string, Words> }> = {
-  en: {
-    desktopOnly: 'Drawn on the desktop only; text surfaces draw nothing behind the pane.',
-    entries: {
-      'band-planning': { name: 'Progress band, planning', help: 'The row above the prompt as a flow starts: Plan, an empty bar, 0%.' },
-      'band-design': { name: 'Progress band, design', help: 'The band while the flow is in its design phase.' },
-      'band-mid-flow': { name: 'Progress band, mid-flow', help: 'Tasks accepted out of planned; the faint layer is work handed to running workers, and the crab walks.' },
-      'band-unplanned': { name: 'Progress band, workers without a plan', help: 'Workers started before any plan was reported: the count of running ones instead of a fraction.' },
-      'band-review': { name: 'Progress band, review', help: 'The band while the orchestrator reviews the workers’ results.' },
-      'band-done': { name: 'Progress band, done', help: 'A finished flow: full green bar, Done, a slow glow; it stays until dismissed.' },
-      'band-hebrew': { name: 'Progress band, Hebrew', help: 'The band with the Hebrew pane language; on the desktop it is mirrored, title on the right, crab on the left.' },
-      'band-russian': { name: 'Progress band, Russian', help: 'The band with the Russian pane language.' },
-      'band-crab': { name: 'Band crab', help: 'The crab at the end of the band; it walks while any agent runs (a clay glyph in the terminal).' },
-      'crew-button': { name: 'Crew button', help: 'Beside the band: how many agents and planned tasks; a press opens or closes the agents pane.' },
-      'dismiss-button': { name: 'Dismiss button', help: 'Beside the band: forgets the flow and takes the band down.' },
-      'pane-full': { name: 'Agents pane', help: 'The whole pane: running, finished and planned subagents under the totals.' },
-      'pane-empty': { name: 'Agents pane, empty', help: 'The pane before any subagent has started or been planned.' },
-      'pane-compact': { name: 'Agents pane, collapsed', help: 'After Collapse: one crab per agent (a glyph in text) and the totals on one row.' },
-      'pane-compact-overflow': { name: 'Agents pane, collapsed with overflow', help: 'More agents than the collapsed row fits: the rest count as +N.' },
-      'pane-finished-hidden': { name: 'Agents pane, finished hidden', help: 'The pane with the Finished list folded away.' },
-      'pane-hebrew': { name: 'Agents pane, Hebrew', help: 'The pane with the Hebrew pane language; on the desktop every row is mirrored and the column hugs the right edge.' },
-      'pane-backdrop': { name: 'Dotted grid backdrop', help: 'The dotted grid behind the desktop pane, showing between the rows.' },
-      'pane-header': { name: 'Pane header', help: 'At the top of the pane: the running flow’s name over its cost, tokens and time.' },
-      'pane-totals': { name: 'Totals', help: 'Estimated cost, tokens and time across every subagent; the header when no flow runs.' },
-      'collapse-button': { name: 'Collapse button', help: 'Folds the pane down to one row.' },
-      'expand-button': { name: 'Expand button', help: 'Unfolds the collapsed pane back to its rows.' },
-      'finished-toggle-open': { name: 'Finished toggle, open', help: 'The head of the Finished list, with its count; a press hides the list.' },
-      'finished-toggle-closed': { name: 'Finished toggle, closed', help: 'The same head while the list is hidden; a press shows it.' },
-      'section-running': { name: 'Running heading', help: 'The dim heading over the running agents, with their count.' },
-      'section-planned': { name: 'Planned heading', help: 'The dim heading over the planned tasks, with their count.' },
-      'agent-row-running': { name: 'Agent row, running', help: 'A worker that reports its steps: steps and note, a bar in its tier’s colour, a pulsing dot.' },
-      'agent-row-running-no-steps': { name: 'Agent row, running without steps', help: 'A worker that reports no steps: the bar falls back to its context fill, in grey.' },
-      'agent-row-finished': { name: 'Agent row, finished', help: 'A run that answered: full bar and a green check.' },
-      'agent-row-failed': { name: 'Agent row, failed', help: 'A run that ended without an answer: error in the meta line and a red cross.' },
-      'agent-row-retry': { name: 'Agent row, second round', help: 'A task delegated again: its round shows in the meta line.' },
-      'agent-row-other': { name: 'Agent row, other subagent', help: 'A subagent outside savvy-flow: its type in grey and the plain crab.' },
-      'planned-row': { name: 'Planned task row', help: 'A task the plan lists that no worker has picked up: dimmed, with the tier’s model.' },
-      'planned-row-waiting': { name: 'Planned task row, waiting', help: 'A planned task that waits for others: after 1, 2.' },
-      'model-badge': { name: 'Model badge', help: 'In each row: the tier in its colour, then model and effort.' },
-      'task-progress': { name: 'Task progress', help: 'In each row: the worker’s reported steps and note over the progress bar.' },
-      'agent-stats': { name: 'Context, cost and time', help: 'In each row: context fill and size, estimated cost, elapsed time.' },
-      'status-marks': { name: 'Status marks', help: 'At the end of each row: running, finished, failed, planned.' },
-      'crab-fable': { name: 'Crab, fable tier', help: 'The astronaut in a glass dome: floats, antenna and star blink.' },
-      'crab-heavy': { name: 'Crab, heavy tier', help: 'The detective in a deerstalker: the magnifier sweeps and glints.' },
-      'crab-careful': { name: 'Crab, careful tier', help: 'The engineer in a hard hat: the wrench turns a bolt.' },
-      'crab-medium': { name: 'Crab, medium tier', help: 'The chef in a toque: tosses the omelette.' },
-      'crab-light': { name: 'Crab, light tier', help: 'The racer in a helmet: runs at double pace, the flag flutters.' },
-      'crab-explore': { name: 'Crab, Explore agent', help: 'The pirate scouting the code: the cutlass fences.' },
-      'crab-other': { name: 'Crab, other subagent', help: 'The plain crab, for any subagent outside the savvy tiers.' },
-    },
-  },
-  pt: {
-    desktopOnly: 'Só no desktop; nas superfícies de texto não há nada atrás do painel.',
-    entries: {
-      'band-planning': { name: 'Barra de progresso, planejando', help: 'A linha acima do prompt quando um fluxo começa: Plan, barra vazia, 0%.' },
-      'band-design': { name: 'Barra de progresso, design', help: 'A barra enquanto o fluxo está na fase de design.' },
-      'band-mid-flow': { name: 'Barra de progresso, no meio do fluxo', help: 'Tarefas aceitas sobre as planejadas; a camada clara é trabalho entregue a workers em execução, e o caranguejo anda.' },
-      'band-unplanned': { name: 'Barra de progresso, workers sem plano', help: 'Workers iniciados antes de um plano ser informado: a contagem dos que rodam em vez de uma fração.' },
-      'band-review': { name: 'Barra de progresso, revisão', help: 'A barra enquanto o orquestrador revisa o resultado dos workers.' },
-      'band-done': { name: 'Barra de progresso, concluída', help: 'Um fluxo encerrado: barra verde cheia, Done, um brilho lento; fica até ser dispensada.' },
-      'band-hebrew': { name: 'Barra de progresso, hebraico', help: 'A barra com o painel em hebraico; no desktop ela é espelhada, título à direita, caranguejo à esquerda.' },
-      'band-russian': { name: 'Barra de progresso, russo', help: 'A barra com o painel em russo.' },
-      'band-crab': { name: 'Caranguejo da barra', help: 'O caranguejo no fim da barra; anda enquanto algum agente roda (um glifo cor de argila no terminal).' },
-      'crew-button': { name: 'Botão da equipe', help: 'Ao lado da barra: quantos agentes e tarefas planejadas; abre ou fecha o painel de agentes.' },
-      'dismiss-button': { name: 'Botão de dispensar', help: 'Ao lado da barra: esquece o fluxo e tira a barra.' },
-      'pane-full': { name: 'Painel de agentes', help: 'O painel inteiro: subagentes em execução, concluídos e planejados sob os totais.' },
-      'pane-empty': { name: 'Painel de agentes, vazio', help: 'O painel antes de qualquer subagente começar ou ser planejado.' },
-      'pane-compact': { name: 'Painel de agentes, recolhido', help: 'Depois de Collapse: um caranguejo por agente (um glifo no texto) e os totais numa linha.' },
-      'pane-compact-overflow': { name: 'Painel de agentes, recolhido com excesso', help: 'Mais agentes do que cabem na linha recolhida: o resto conta como +N.' },
-      'pane-finished-hidden': { name: 'Painel de agentes, concluídos ocultos', help: 'O painel com a lista de concluídos recolhida.' },
-      'pane-hebrew': { name: 'Painel de agentes, hebraico', help: 'O painel em hebraico; no desktop cada linha é espelhada e a coluna encosta na borda direita.' },
-      'pane-backdrop': { name: 'Fundo de grade pontilhada', help: 'A grade pontilhada atrás do painel no desktop, visível entre as linhas.' },
-      'pane-header': { name: 'Cabeçalho do painel', help: 'No topo do painel: o nome do fluxo em execução sobre custo, tokens e tempo.' },
-      'pane-totals': { name: 'Totais', help: 'Custo estimado, tokens e tempo de todos os subagentes; o cabeçalho quando nenhum fluxo roda.' },
-      'collapse-button': { name: 'Botão de recolher', help: 'Recolhe o painel numa linha só.' },
-      'expand-button': { name: 'Botão de expandir', help: 'Abre de novo as linhas do painel recolhido.' },
-      'finished-toggle-open': { name: 'Alternador de concluídos, aberto', help: 'O topo da lista de concluídos, com a contagem; um clique oculta a lista.' },
-      'finished-toggle-closed': { name: 'Alternador de concluídos, fechado', help: 'O mesmo topo com a lista oculta; um clique mostra a lista.' },
-      'section-running': { name: 'Título Em execução', help: 'O título discreto sobre os agentes em execução, com a contagem.' },
-      'section-planned': { name: 'Título Planejados', help: 'O título discreto sobre as tarefas planejadas, com a contagem.' },
-      'agent-row-running': { name: 'Linha de agente, em execução', help: 'Um worker que informa seus passos: passos e nota, barra na cor do tier, ponto pulsando.' },
-      'agent-row-running-no-steps': { name: 'Linha de agente, em execução sem passos', help: 'Um worker que não informa passos: a barra mostra o uso de contexto, em cinza.' },
-      'agent-row-finished': { name: 'Linha de agente, concluída', help: 'Uma execução que respondeu: barra cheia e check verde.' },
-      'agent-row-failed': { name: 'Linha de agente, com erro', help: 'Uma execução que terminou sem resposta: error na linha de detalhes e um X vermelho.' },
-      'agent-row-retry': { name: 'Linha de agente, segunda rodada', help: 'Uma tarefa delegada de novo: a rodada aparece na linha de detalhes.' },
-      'agent-row-other': { name: 'Linha de agente, outro subagente', help: 'Um subagente fora do savvy-flow: o tipo em cinza e o caranguejo simples.' },
-      'planned-row': { name: 'Linha de tarefa planejada', help: 'Uma tarefa do plano que nenhum worker pegou: esmaecida, com o modelo do tier.' },
-      'planned-row-waiting': { name: 'Linha de tarefa planejada, aguardando', help: 'Uma tarefa planejada que espera outras: after 1, 2.' },
-      'model-badge': { name: 'Selo do modelo', help: 'Em cada linha: o tier na sua cor, depois modelo e esforço.' },
-      'task-progress': { name: 'Progresso da tarefa', help: 'Em cada linha: os passos e a nota que o worker informou, sobre a barra de progresso.' },
-      'agent-stats': { name: 'Contexto, custo e tempo', help: 'Em cada linha: uso e tamanho do contexto, custo estimado, tempo decorrido.' },
-      'status-marks': { name: 'Marcas de status', help: 'No fim de cada linha: em execução, concluído, com erro, planejado.' },
-      'crab-fable': { name: 'Caranguejo, tier fable', help: 'O astronauta no capacete de vidro: flutua, antena e estrela piscam.' },
-      'crab-heavy': { name: 'Caranguejo, tier heavy', help: 'O detetive de chapéu: a lupa varre e brilha.' },
-      'crab-careful': { name: 'Caranguejo, tier careful', help: 'O engenheiro de capacete: a chave gira um parafuso.' },
-      'crab-medium': { name: 'Caranguejo, tier medium', help: 'O chef de toque: joga a omelete.' },
-      'crab-light': { name: 'Caranguejo, tier light', help: 'O piloto de capacete: corre no dobro do ritmo, a bandeira tremula.' },
-      'crab-explore': { name: 'Caranguejo, agente Explore', help: 'O pirata explorando o código: o sabre esgrima.' },
-      'crab-other': { name: 'Caranguejo, outro subagente', help: 'O caranguejo simples, para qualquer subagente fora dos tiers do savvy.' },
-    },
-  },
-}
-
-// The crab and its tier word: the pixel crab on the desktop, the tier's glyph in text.
-const crabSample = (fr: Frame, costume: string): RenderElement => {
-  const { Text } = fr.ui
-  const tier = costume === 'explore' ? 'other' : costume
-  const word = costume === 'explore' ? 'Explore' : tierWord(tier)
-  if (!fr.Svg) {
-    return (
-      <Text>
-        <Text color={colorOf(tier)}>▣</Text> {word}
-      </Text>
-    )
-  }
-  const { Svg } = fr
-  const model = tierModel(tier)
-  const body = `${rowCrab(fr.W, 0, 4, costume, false, true)}
-<text ${startText(fr.W, 42, 24)} font-family="${FONT}" font-size="12"><tspan fill="${colorOf(tier)}">${xml(word)}</tspan>${model ? `<tspan class="s">  ${xml(model)}</tspan>` : ''}</text>`
-  return <Svg source={svg(fr.W, 40, body)} alt={word} width={fr.W} height={40} />
-}
-
-// The four marks a row ends with, each with its word.
-const statusMarksSample = (fr: Frame): RenderElement => {
-  const s = tr()
-  const { Text } = fr.ui
-  const color = colorOf('careful')
-  const marks = [
-    ['running', s.isRunning, color],
-    ['done', s.isFinished, 'green'],
-    ['failed', s.failed, 'red'],
-    ['planned', s.isPlanned, ''],
-  ] as const
-  if (!fr.Svg) {
-    return (
-      <Text>
-        {marks.map(([status, word, c]) => (
-          <Text key={status} {...(c ? { color: c } : { dimColor: true })}>
-            {STATUS_GLYPH[status]} {word}
-            {'   '}
-          </Text>
-        ))}
-      </Text>
-    )
-  }
-  const { Svg } = fr
-  const body = marks
-    .map(([status, word], i) => `${statusMark(mx(fr.W, 10 + i * 110), 12, status, color)}<text class="s" ${startText(fr.W, 24 + i * 110, 16)} font-family="${FONT}" font-size="11">${xml(word)}</text>`)
-    .join('')
-  return <Svg source={svg(fr.W, 24, body)} alt={marks.map(m => m[1]).join(', ')} width={fr.W} height={24} />
-}
-
-// One row part drawn alone: an SVG strip on the desktop, its text line elsewhere.
-const partSample = (fr: Frame, alt: string, height: number, body: string, text: () => RenderElement): RenderElement => {
-  if (!fr.Svg) return text()
-  const { Svg } = fr
-  return <Svg source={svg(fr.W, height, body)} alt={alt} width={fr.W} height={height} />
-}
-
-const column = (fr: Frame, children: RenderElement[]): RenderElement => {
-  const { Box } = fr.ui
-  return (
-    <Box flexDirection="column" alignItems={fr.Svg && isRtl() ? 'flex-end' : undefined}>
-      {children}
-    </Box>
-  )
-}
-
 // A noun's answer crosses as plain data: a Button (an Input, a Select, a Client) becomes
 // a Text with its label, and every function and `press` stamp is dropped.
 const staticTree = (node: unknown): unknown => {
@@ -1662,23 +1425,172 @@ const staticTree = (node: unknown): unknown => {
   )
 }
 
-function catalogOf($: EngineInterface, args: SavvyPanelArgs): SavvyCatalogEntry[] {
+type Words = { name: string; help: string }
+
+const CATALOG: Record<SavvyLang, Record<string, Words>> = {
+  en: {
+    'band-planning': { name: 'Progress band, planning', help: 'The row above the prompt as a flow starts: an empty ring at 0%, the title, an empty track and Plan.' },
+    'band-design': { name: 'Progress band, design', help: 'The band while the flow is in its design phase.' },
+    'band-mid-flow': { name: 'Progress band, mid-flow', help: 'Tasks accepted out of planned: the ring’s percent, accepted segments in the accent, segments handed to running workers faint, and the crab walks.' },
+    'band-unplanned': { name: 'Progress band, workers without a plan', help: 'Workers started before any plan was reported: the count of running ones instead of a fraction.' },
+    'band-review': { name: 'Progress band, review', help: 'The band while the orchestrator reviews the workers’ results.' },
+    'band-done': { name: 'Progress band, done', help: 'A finished flow: a full ring, a full track and Done, all in the ok colour; it stays until dismissed.' },
+    'band-hebrew': { name: 'Progress band, Hebrew', help: 'The band with the Hebrew pane language: mirrored, the ring and title on the right, the buttons on the left.' },
+    'band-russian': { name: 'Progress band, Russian', help: 'The band with the Russian pane language.' },
+    'band-narrow': { name: 'Progress band, narrow', help: 'A band too narrow for the track: the ring, the title and the state still show.' },
+    'band-track': { name: 'Task track', help: 'In the band: one segment per planned task, accepted, handed to a worker or still to do; many tasks run together into one bar.' },
+    'band-crab': { name: 'Band crab', help: 'The crab beside the band’s state; it walks while any agent runs (a muted glyph in the terminal).' },
+    'crew-button': { name: 'Agents button', help: 'Beside the band: how many agents and planned tasks; a press opens or closes the agents pane.' },
+    'dismiss-button': { name: 'Dismiss button', help: 'At the band’s end: forgets the flow and takes the band down; the desktop draws its native close control.' },
+    'pane-full': { name: 'Agents pane', help: 'The whole pane: the flow and totals over the Running, Finished and Planned groups.' },
+    'pane-empty': { name: 'Agents pane, empty', help: 'The pane before any subagent has started or been planned.' },
+    'pane-compact': { name: 'Agents pane, collapsed', help: 'The collapsed view: one crab per agent with its state’s dot (a glyph in text), under the totals.' },
+    'pane-compact-overflow': { name: 'Agents pane, collapsed with overflow', help: 'More agents than the collapsed row fits: the rest count as +N.' },
+    'pane-finished-hidden': { name: 'Agents pane, finished hidden', help: 'The pane with the Finished group folded away to its head.' },
+    'pane-hebrew': { name: 'Agents pane, Hebrew', help: 'The pane with the Hebrew pane language: every row mirrored, crab and name on the right.' },
+    'pane-header': { name: 'Pane header', help: 'At the top of the pane: the running flow’s name and progress ring, then the totals and Collapse.' },
+    'pane-totals': { name: 'Totals', help: 'Estimated cost, tokens and time across every subagent of the session.' },
+    'flow-ring': { name: 'Flow progress ring', help: 'In the pane header: the share of tasks accepted, with the phase and count.' },
+    'collapse-button': { name: 'Collapse button', help: 'Folds the pane down to one row of crabs; every session follows.' },
+    'expand-button': { name: 'Expand button', help: 'Unfolds the collapsed pane back to its groups.' },
+    'finished-toggle-open': { name: 'Finished head, shown', help: 'The head of the Finished group, with its count; Hide folds the group away.' },
+    'finished-toggle-closed': { name: 'Finished head, hidden', help: 'The same head while the group is folded; Show brings it back.' },
+    'section-running': { name: 'Running heading', help: 'The heading over the running agents, with their count.' },
+    'section-planned': { name: 'Planned heading', help: 'The heading over the planned tasks, with their count.' },
+    'agent-row-running': { name: 'Agent row, running', help: 'A worker that reports its steps: its crab walks, a steps ring and note, the context ring, cost and time, and running.' },
+    'agent-row-running-no-steps': { name: 'Agent row, running without steps', help: 'A worker that reports no steps: only the context ring, cost and time under its name.' },
+    'agent-row-finished': { name: 'Agent row, finished', help: 'A run that answered: a full steps ring and finished, in the ok colour.' },
+    'agent-row-failed': { name: 'Agent row, failed', help: 'A run that ended without an answer: error, in the err colour.' },
+    'agent-row-retry': { name: 'Agent row, second round', help: 'A task delegated again: its round shows in the meta line.' },
+    'agent-row-other': { name: 'Agent row, other subagent', help: 'A subagent outside savvy-flow: its own type in the meta line and the plain crab.' },
+    'planned-row': { name: 'Planned task row', help: 'A task the plan lists that no worker has picked up: a dim crab, muted text, the tier’s model.' },
+    'planned-row-waiting': { name: 'Planned task row, waiting', help: 'A planned task that waits for others: after 1, 2.' },
+    'model-badge': { name: 'Meta line', help: 'Under each name: the tier (or the subagent’s type), the model and effort, and the round.' },
+    'task-progress': { name: 'Task progress', help: 'Under each name: the worker’s reported steps as a ring, with the step count and note.' },
+    'agent-stats': { name: 'Context, cost and time', help: 'Under each name: the context ring with the context size, then estimated cost and elapsed time.' },
+    'context-ring-high': { name: 'Context ring, nearly full', help: 'The context ring past 80%, in the warn colour; past 95% it turns err.' },
+    'status-marks': { name: 'States', help: 'At the end of each row: running, finished, error, planned, each a dot and a word.' },
+    'crab-fable': { name: 'Crab, fable tier', help: 'The astronaut in a glass dome: floats, antenna and star blink.' },
+    'crab-heavy': { name: 'Crab, heavy tier', help: 'The detective in a deerstalker: the magnifier sweeps and glints.' },
+    'crab-careful': { name: 'Crab, careful tier', help: 'The engineer in a hard hat: the wrench turns a bolt.' },
+    'crab-medium': { name: 'Crab, medium tier', help: 'The chef in a toque: tosses the omelette.' },
+    'crab-light': { name: 'Crab, light tier', help: 'The racer in a helmet: runs at double pace, the flag flutters.' },
+    'crab-explore': { name: 'Crab, Explore agent', help: 'The pirate scouting the code: the cutlass fences.' },
+    'crab-other': { name: 'Crab, other subagent', help: 'The plain crab, for any subagent outside the savvy tiers.' },
+  },
+  pt: {
+    'band-planning': { name: 'Barra de progresso, planejando', help: 'A linha acima do prompt quando um fluxo começa: anel vazio em 0%, o título, a trilha vazia e Plan.' },
+    'band-design': { name: 'Barra de progresso, design', help: 'A barra enquanto o fluxo está na fase de design.' },
+    'band-mid-flow': { name: 'Barra de progresso, no meio do fluxo', help: 'Tarefas aceitas sobre as planejadas: o percentual no anel, segmentos aceitos na cor de destaque, os entregues a workers em execução mais claros, e o caranguejo anda.' },
+    'band-unplanned': { name: 'Barra de progresso, workers sem plano', help: 'Workers iniciados antes de um plano ser informado: a contagem dos que rodam em vez de uma fração.' },
+    'band-review': { name: 'Barra de progresso, revisão', help: 'A barra enquanto o orquestrador revisa o resultado dos workers.' },
+    'band-done': { name: 'Barra de progresso, concluída', help: 'Um fluxo encerrado: anel cheio, trilha cheia e Done, tudo na cor de sucesso; fica até ser dispensada.' },
+    'band-hebrew': { name: 'Barra de progresso, hebraico', help: 'A barra com o painel em hebraico: espelhada, anel e título à direita, botões à esquerda.' },
+    'band-russian': { name: 'Barra de progresso, russo', help: 'A barra com o painel em russo.' },
+    'band-narrow': { name: 'Barra de progresso, estreita', help: 'Uma barra estreita demais para a trilha: o anel, o título e o estado continuam visíveis.' },
+    'band-track': { name: 'Trilha de tarefas', help: 'Na barra: um segmento por tarefa planejada, aceita, entregue a um worker ou pendente; muitas tarefas viram uma barra contínua.' },
+    'band-crab': { name: 'Caranguejo da barra', help: 'O caranguejo ao lado do estado da barra; anda enquanto algum agente roda (um glifo discreto no terminal).' },
+    'crew-button': { name: 'Botão de agentes', help: 'Ao lado da barra: quantos agentes e tarefas planejadas; abre ou fecha o painel de agentes.' },
+    'dismiss-button': { name: 'Botão de dispensar', help: 'No fim da barra: esquece o fluxo e tira a barra; o desktop desenha seu controle nativo de fechar.' },
+    'pane-full': { name: 'Painel de agentes', help: 'O painel inteiro: fluxo e totais sobre os grupos Em execução, Concluídos e Planejados.' },
+    'pane-empty': { name: 'Painel de agentes, vazio', help: 'O painel antes de qualquer subagente começar ou ser planejado.' },
+    'pane-compact': { name: 'Painel de agentes, recolhido', help: 'A visão recolhida: um caranguejo por agente com o ponto do seu estado (um glifo no texto), sob os totais.' },
+    'pane-compact-overflow': { name: 'Painel de agentes, recolhido com excesso', help: 'Mais agentes do que cabem na linha recolhida: o resto conta como +N.' },
+    'pane-finished-hidden': { name: 'Painel de agentes, concluídos ocultos', help: 'O painel com o grupo de concluídos recolhido ao seu título.' },
+    'pane-hebrew': { name: 'Painel de agentes, hebraico', help: 'O painel em hebraico: cada linha espelhada, caranguejo e nome à direita.' },
+    'pane-header': { name: 'Cabeçalho do painel', help: 'No topo do painel: o nome e o anel de progresso do fluxo em execução, depois os totais e Collapse.' },
+    'pane-totals': { name: 'Totais', help: 'Custo estimado, tokens e tempo de todos os subagentes da sessão.' },
+    'flow-ring': { name: 'Anel de progresso do fluxo', help: 'No cabeçalho do painel: a parcela de tarefas aceitas, com a fase e a contagem.' },
+    'collapse-button': { name: 'Botão de recolher', help: 'Recolhe o painel numa linha de caranguejos; todas as sessões seguem.' },
+    'expand-button': { name: 'Botão de expandir', help: 'Abre de novo os grupos do painel recolhido.' },
+    'finished-toggle-open': { name: 'Título de concluídos, visível', help: 'O título do grupo de concluídos, com a contagem; Hide recolhe o grupo.' },
+    'finished-toggle-closed': { name: 'Título de concluídos, oculto', help: 'O mesmo título com o grupo recolhido; Show traz o grupo de volta.' },
+    'section-running': { name: 'Título Em execução', help: 'O título sobre os agentes em execução, com a contagem.' },
+    'section-planned': { name: 'Título Planejados', help: 'O título sobre as tarefas planejadas, com a contagem.' },
+    'agent-row-running': { name: 'Linha de agente, em execução', help: 'Um worker que informa seus passos: o caranguejo anda, anel de passos e nota, anel de contexto, custo e tempo, e running.' },
+    'agent-row-running-no-steps': { name: 'Linha de agente, em execução sem passos', help: 'Um worker que não informa passos: só o anel de contexto, custo e tempo sob o nome.' },
+    'agent-row-finished': { name: 'Linha de agente, concluída', help: 'Uma execução que respondeu: anel de passos cheio e finished, na cor de sucesso.' },
+    'agent-row-failed': { name: 'Linha de agente, com erro', help: 'Uma execução que terminou sem resposta: error, na cor de erro.' },
+    'agent-row-retry': { name: 'Linha de agente, segunda rodada', help: 'Uma tarefa delegada de novo: a rodada aparece na linha de detalhes.' },
+    'agent-row-other': { name: 'Linha de agente, outro subagente', help: 'Um subagente fora do savvy-flow: o próprio tipo na linha de detalhes e o caranguejo simples.' },
+    'planned-row': { name: 'Linha de tarefa planejada', help: 'Uma tarefa do plano que nenhum worker pegou: caranguejo esmaecido, texto discreto, o modelo do tier.' },
+    'planned-row-waiting': { name: 'Linha de tarefa planejada, aguardando', help: 'Uma tarefa planejada que espera outras: after 1, 2.' },
+    'model-badge': { name: 'Linha de detalhes', help: 'Sob cada nome: o tier (ou o tipo do subagente), modelo e esforço, e a rodada.' },
+    'task-progress': { name: 'Progresso da tarefa', help: 'Sob cada nome: os passos que o worker informou como anel, com a contagem e a nota.' },
+    'agent-stats': { name: 'Contexto, custo e tempo', help: 'Sob cada nome: o anel de contexto com o tamanho do contexto, depois custo estimado e tempo decorrido.' },
+    'context-ring-high': { name: 'Anel de contexto, quase cheio', help: 'O anel de contexto acima de 80%, na cor de alerta; acima de 95% fica na cor de erro.' },
+    'status-marks': { name: 'Estados', help: 'No fim de cada linha: running, finished, error, planned, cada um com ponto e palavra.' },
+    'crab-fable': { name: 'Caranguejo, tier fable', help: 'O astronauta no capacete de vidro: flutua, antena e estrela piscam.' },
+    'crab-heavy': { name: 'Caranguejo, tier heavy', help: 'O detetive de chapéu: a lupa varre e brilha.' },
+    'crab-careful': { name: 'Caranguejo, tier careful', help: 'O engenheiro de capacete: a chave gira um parafuso.' },
+    'crab-medium': { name: 'Caranguejo, tier medium', help: 'O chef de toque: joga a omelete.' },
+    'crab-light': { name: 'Caranguejo, tier light', help: 'O piloto de capacete: corre no dobro do ritmo, a bandeira tremula.' },
+    'crab-explore': { name: 'Caranguejo, agente Explore', help: 'O pirata explorando o código: o sabre esgrima.' },
+    'crab-other': { name: 'Caranguejo, outro subagente', help: 'O caranguejo simples, para qualquer subagente fora dos tiers do savvy.' },
+  },
+}
+
+// The crab with its tier word and model, as a row's lead would show it.
+const crabSample = (k: Kit, costume: string): RenderElement => {
+  const { Box } = k.ui
+  const tier = costume === 'explore' ? 'other' : costume
+  const word = costume === 'explore' ? 'Explore' : tierWord(tier)
+  const model = tierModel(tier)
+  return (
+    <Box flexDirection={dir()} columnGap={1} alignItems="center" paddingX={1}>
+      {crabEl(k, costume, { walking: true })}
+      {text(k, word)}
+      {model ? text(k, model, 'muted') : null}
+    </Box>
+  )
+}
+
+// The four states a row ends with.
+const statusMarksSample = (k: Kit): RenderElement => {
+  const { Box } = k.ui
+  return (
+    <Box flexDirection={dir()} columnGap={3} paddingX={1} flexWrap="wrap">
+      {(['running', 'done', 'failed', 'planned'] as const).map(st => {
+        const [word, tone] = stateOf(st)
+        return (
+          <Box key={`mark-${st}`} flexDirection="row">
+            {status(k, word, tone)}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+const padded = (k: Kit, children: (RenderElement | null)[]): RenderElement => {
+  const { Box } = k.ui
+  return (
+    <Box flexDirection="column" paddingX={1} alignItems={along()}>
+      {children.filter(Boolean)}
+    </Box>
+  )
+}
+
+async function catalogOf($: EngineInterface, args: SavvyPanelArgs): Promise<SavvyCatalogEntry[]> {
   const words = CATALOG[args.lang === 'pt' ? 'pt' : 'en']
   const columns = Math.max(24, (args.columns || 80) - 4)
-  const bandUi = $.ui.resolve({ surface: args.surface, component: 'AbovePrompt' })
-  const fr = paneFrame($.ui.resolve({ surface: args.surface, component: 'Pane' }), args.surface, columns)
-  const { Text } = fr.ui
+  const tone = toneOf(await skinOf($))
+  const bk = kitOf($.ui.resolve({ surface: args.surface, component: 'AbovePrompt' }) as unknown as KitUi, tone, args.surface, columns)
+  const k = kitOf($.ui.resolve({ surface: args.surface, component: 'Pane' }) as unknown as KitUi, tone, args.surface, columns)
+  const { Svg } = k.ui
   const at = SAMPLE_AT
   const full = paneView(SAMPLE_LIST, FLOWS.midFlow, at)
 
-  const band = (f: Flow, crew: number, isWorking: boolean) => bandTree(bandUi, args.surface, columns, { f, crew, isWorking, onCrew: noop, onDismiss: noop })
+  const band = (f: Flow, crew: number, isWorking: boolean, kit: Kit = bk) => bandTree(kit, { f, crew, isWorking, onCrew: noop, onDismiss: noop })
 
   // Enough agents to run past what the collapsed desktop row fits.
-  const many = Array.from({ length: Math.max(1, Math.floor((fr.W - 150) / 36)) + 4 }, (_, i) => {
+  const many = Array.from({ length: Math.max(1, Math.floor((columns * 8 - 72) / SLOT)) + 4 }, (_, i) => {
     const kinds = [SAMPLE.steps, SAMPLE.context, SAMPLE.done, SAMPLE.failed, SAMPLE.other] as const
     const base = kinds[i % kinds.length] ?? SAMPLE.done
     return { ...base, id: `many-${i}` }
   })
+
+  const trackW = Math.max(120, Math.min(480, columns * 8 - 32))
 
   const draws: [id: string, draw: () => RenderElement][] = [
     ['band-planning', () => band(FLOWS.planning, 0, false)],
@@ -1689,71 +1601,54 @@ function catalogOf($: EngineInterface, args: SavvyPanelArgs): SavvyCatalogEntry[
     ['band-done', () => band(FLOWS.done, 6, false)],
     ['band-hebrew', () => inLang('he', () => band(FLOWS.midFlow, 7, true))],
     ['band-russian', () => inLang('ru', () => band(FLOWS.midFlow, 7, true))],
+    ['band-narrow', () => band(FLOWS.midFlow, 7, true, kitOf(bk.ui, tone, args.surface, 56))],
     [
-      'band-crab',
-      () => {
-        if (args.surface === 'terminal' || !('Svg' in bandUi)) return termCrab(bandUi)
-        const { Svg } = bandUi
-        const source = `<svg xmlns="http://www.w3.org/2000/svg" width="${CRAB_W}" height="${H}" viewBox="0 0 ${CRAB_W} ${H}">${CRAB_CSS}${bandCrab(0, true, false)}</svg>`
-        return <Svg source={source} alt="crab" width={CRAB_W} height={H} />
-      },
-    ],
-    ['crew-button', () => crewButton(bandUi, 7, noop)],
-    ['dismiss-button', () => dismissButton(bandUi, noop)],
-
-    ['pane-full', () => paneTree(fr, full, OPEN_PANEL, noop, noop)],
-    ['pane-empty', () => paneTree(fr, paneView([], null, at), OPEN_PANEL, noop, noop)],
-    ['pane-compact', () => paneTree(fr, full, { ...OPEN_PANEL, isCompact: true }, noop, noop)],
-    ['pane-compact-overflow', () => paneTree(fr, paneView(many, null, at), { ...OPEN_PANEL, isCompact: true }, noop, noop)],
-    ['pane-finished-hidden', () => paneTree(fr, full, { ...OPEN_PANEL, isDoneCollapsed: true }, noop, noop)],
-    ['pane-hebrew', () => inLang('he', () => paneTree(fr, full, OPEN_PANEL, noop, noop))],
-    ['pane-backdrop', () => (fr.Svg ? column(fr, gridBackdrop(fr, 96)) : <Text dimColor>{words.desktopOnly}</Text>)],
-    [
-      'pane-header',
-      () => (fr.Svg ? headerTiles(fr, full.title, full.t) : column(fr, [titleRow(fr, full.title, compactButton(fr, false, noop)), totalsLine(fr, full.t)])),
-    ],
-    ['pane-totals', () => headerTiles(fr, '', full.t)],
-    ['collapse-button', () => compactButton(fr, false, noop)],
-    ['expand-button', () => compactButton(fr, true, noop)],
-    ['finished-toggle-open', () => finishedToggle(fr, false, full.finished.length, noop)],
-    ['finished-toggle-closed', () => finishedToggle(fr, true, full.finished.length, noop)],
-    ['section-running', () => sectionHead(fr, 'h-run', `${tr().running} · ${full.running.length}`)],
-    ['section-planned', () => sectionHead(fr, 'h-plan', `${tr().planned} · ${full.planned.length}`)],
-
-    ['agent-row-running', () => agentRow(fr, SAMPLE.steps, at)],
-    ['agent-row-running-no-steps', () => agentRow(fr, SAMPLE.context, at)],
-    ['agent-row-finished', () => agentRow(fr, SAMPLE.done, at)],
-    ['agent-row-failed', () => agentRow(fr, SAMPLE.failed, at)],
-    ['agent-row-retry', () => agentRow(fr, SAMPLE.retry, at)],
-    ['agent-row-other', () => agentRow(fr, SAMPLE.other, at)],
-    ['planned-row', () => plannedRow(fr, { title: 'Design the data model', tier: 'fable', after: [], n: 5 })],
-    ['planned-row-waiting', () => plannedRow(fr, { title: 'Write the README', tier: 'light', after: [1, 2], n: 6 })],
-    ['model-badge', () => partSample(fr, runModel(SAMPLE.steps), 18, agentBadgeSvg(fr.W, SAMPLE.steps, 0, 13), () => termBadge(fr, SAMPLE.steps))],
-    [
-      'task-progress',
+      'band-track',
       () =>
-        partSample(fr, termSteps(SAMPLE.steps), 26, agentStepsSvg(fr.W, SAMPLE.steps, at, 0, 11, fr.W) + agentBarSvg(fr.W, SAMPLE.steps, 0, 18, fr.W), () => (
-          <Text wrap="truncate-end">
-            {termBar(fr, SAMPLE.steps)}
-            <Text dimColor> {termSteps(SAMPLE.steps).replace(/ · $/, '')}</Text>
-          </Text>
-        )),
+        bk.vector ? (
+          <Svg source={trackSvg(bk, FLOWS.midFlow, trackW)} alt={label(FLOWS.midFlow)} width={trackW} height={TRACK_H} />
+        ) : (
+          text(bk, barText(FLOWS.midFlow, 24), 'accent')
+        ),
     ],
-    [
-      'agent-stats',
-      () =>
-        partSample(fr, termStats(SAMPLE.steps, at), 18, agentStatsSvg(fr.W, SAMPLE.steps, at, 0, 13, fr.W), () => (
-          <Text dimColor wrap="truncate-end">
-            {termStats(SAMPLE.steps, at)}
-          </Text>
-        )),
-    ],
-    ['status-marks', () => statusMarksSample(fr)],
-    ...COSTUMES_SHOWN.map((c): [string, () => RenderElement] => [`crab-${c}`, () => crabSample(fr, c)]),
+    ['band-crab', () => crabEl(bk, 'other', { scale: BAND_CRAB, walking: true })],
+    ['crew-button', () => crewButton(bk, 7, noop)],
+    ['dismiss-button', () => dismissButton(bk, noop)],
+
+    ['pane-full', () => paneTree(k, full, OPEN_PANEL, noop, noop)],
+    ['pane-empty', () => paneTree(k, paneView([], null, at), OPEN_PANEL, noop, noop)],
+    ['pane-compact', () => paneTree(k, full, { ...OPEN_PANEL, isCompact: true }, noop, noop)],
+    ['pane-compact-overflow', () => paneTree(k, paneView(many, null, at), { ...OPEN_PANEL, isCompact: true }, noop, noop)],
+    ['pane-finished-hidden', () => paneTree(k, full, { ...OPEN_PANEL, isDoneCollapsed: true }, noop, noop)],
+    ['pane-hebrew', () => inLang('he', () => paneTree(k, full, OPEN_PANEL, noop, noop))],
+    ['pane-header', () => paneHeader(k, full, compactButton(k, false, noop))],
+    ['pane-totals', () => padded(k, [totalsLine(k, full.t)])],
+    ['flow-ring', () => padded(k, [progressRing(k, 'flow-ring', ratio(FLOWS.midFlow), label(FLOWS.midFlow))])],
+    ['collapse-button', () => compactButton(k, false, noop)],
+    ['expand-button', () => compactButton(k, true, noop)],
+    ['finished-toggle-open', () => finishedToggle(k, false, full.finished.length, noop)],
+    ['finished-toggle-closed', () => finishedToggle(k, true, full.finished.length, noop)],
+    ['section-running', () => head(k, 'h-run', tr().running, String(full.running.length))],
+    ['section-planned', () => head(k, 'h-plan', tr().planned, String(full.planned.length))],
+
+    ['agent-row-running', () => agentRow(k, SAMPLE.steps, at)],
+    ['agent-row-running-no-steps', () => agentRow(k, SAMPLE.context, at)],
+    ['agent-row-finished', () => agentRow(k, SAMPLE.done, at)],
+    ['agent-row-failed', () => agentRow(k, SAMPLE.failed, at)],
+    ['agent-row-retry', () => agentRow(k, SAMPLE.retry, at)],
+    ['agent-row-other', () => agentRow(k, SAMPLE.other, at)],
+    ['planned-row', () => plannedRow(k, { title: 'Design the data model', tier: 'fable', after: [], n: 5 })],
+    ['planned-row-waiting', () => plannedRow(k, { title: 'Write the README', tier: 'light', after: [1, 2], n: 6 })],
+    ['model-badge', () => padded(k, [text(k, runMeta(SAMPLE.steps), 'muted')])],
+    ['task-progress', () => padded(k, [agentSteps(k, SAMPLE.steps)])],
+    ['agent-stats', () => padded(k, [agentStats(k, SAMPLE.steps, at)])],
+    ['context-ring-high', () => padded(k, [meter(k, 'ctx-high', tr().context, 86, fmtTokens(860_000))])],
+    ['status-marks', () => statusMarksSample(k)],
+    ...COSTUMES_SHOWN.map((c): [string, () => RenderElement] => [`crab-${c}`, () => crabSample(k, c)]),
   ]
 
   return draws.map(([id, draw]) => {
-    const w = words.entries[id] ?? { name: id, help: '' }
+    const w = words[id] ?? { name: id, help: '' }
     return { id, name: w.name, help: w.help, tree: staticTree(draw()) }
   })
 }
@@ -1761,7 +1656,8 @@ function catalogOf($: EngineInterface, args: SavvyPanelArgs): SavvyCatalogEntry[
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    lang = await detectLang($, options.language)
+    // The user's settings and the pane's view choices, as stored; sets the pane language.
+    await syncSettings($, options)
     await $.tool.register({
       name: 'progress',
       description:
@@ -1822,6 +1718,8 @@ export const register: Register = (on, options) => {
         await update($, now, () => at)
       })()
     })
+    // Another session may change a setting: read the stored ones again, slowly.
+    $.clock.every(3000, () => void syncSettings($, options))
     return started
   })
 
@@ -1834,7 +1732,7 @@ export const register: Register = (on, options) => {
   })
   on('savvy.panel', async ($, e) => ({ value: await panelOf($, e, options) }))
   on('savvy.act', async ($, e) => ({ value: await actOn($, e) }))
-  on('savvy.catalog', async ($, e) => ({ value: catalogOf($, e) }))
+  on('savvy.catalog', async ($, e) => ({ value: await catalogOf($, e) }))
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
     // The flow is the main session's: a call from a worker's loop carries its agentId
@@ -1914,7 +1812,7 @@ export const register: Register = (on, options) => {
     if (e.subagentType.startsWith('savvy-')) {
       const f = await read($, flow)
       await autoOpen($, f && !f.isFinished ? f.title : 'savvy-flow')
-    } else if (options.autoOpen === 'any') {
+    } else if (((await read($, prefs)) ?? prefsFrom([], options)).autoOpen === 'any') {
       await autoOpen($, 'any-agent')
     }
     return started
@@ -1995,12 +1893,13 @@ export const register: Register = (on, options) => {
     const f = await read($, flow)
     const p: Panel = await read($, panel)
     const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
+    const k = kitOf($.ui.resolve(e) as unknown as KitUi, toneOf(await skinOf($)), e.surface, e.props.bodyColumns)
     return paneTree(
-      paneFrame($.ui.resolve(e), e.surface, e.props.bodyColumns),
+      k,
       paneView(list, f, at),
       p,
-      () => void update($, panel, prev => ({ ...prev, isCompact: !prev.isCompact })),
-      () => void update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed })),
+      () => void setView($, 'compact', !p.isCompact),
+      () => void setView($, 'hideFinished', !p.isDoneCollapsed),
     )
   })
 
@@ -2013,7 +1912,8 @@ export const register: Register = (on, options) => {
     const below = drawn && typeof drawn === 'object' && (drawn as { type?: string }).type !== 'engine' ? drawn : null
 
     const list = await read($, agents)
-    return bandTree($.ui.resolve(e), e.surface, e.props.bodyColumns, {
+    const k = kitOf($.ui.resolve(e) as unknown as KitUi, toneOf(await skinOf($)), e.surface, e.props.bodyColumns)
+    return bandTree(k, {
       f,
       crew: list.length + plannedOf(f, list).length,
       isWorking: list.some(a => a.status === 'running'),
