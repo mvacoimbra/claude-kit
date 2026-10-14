@@ -107,7 +107,7 @@ test('catalog: trees for the terminal are text, for the desktop SVG rows', { plu
   }
   // Static trees: no Button crosses, its label is drawn as text.
   for (const e of [...terminal, ...desktop]) expect(types(e.tree)).not.toContain('Button')
-  expect(JSON.stringify(desktop.find(e => e.id === 'crew-button')?.tree)).toContain('×7')
+  expect(JSON.stringify(desktop.find(e => e.id === 'crew-button')?.tree)).toContain('Agents · 7')
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {

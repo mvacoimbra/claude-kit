@@ -14,10 +14,9 @@ test('caller: a subagent cannot report the flow', async $ => {
 
   // Nothing moved: the band still draws the same flow.
   const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: band })
-  const row = String((await ui.find({ type: 'Svg' }))?.props.source)
-  expect(row).toContain('Ship the thing')
-  expect(row).toContain('Tasks 1/3')
-  expect(row).not.toContain('Hijacked')
+  expect(await ui.find({ type: 'Text', text: /^Ship the thing$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Tasks 1\/3$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Hijacked/ })).toBeUndefined()
 
   // The main session still can.
   expect(await $.tool.call({ tool: PROGRESS, done: 2 } as never)).toMatchObject({ result: 'ok: Tasks 2/3' })

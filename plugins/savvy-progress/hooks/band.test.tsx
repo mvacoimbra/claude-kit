@@ -27,7 +27,9 @@ test('terminal: the row draws the title, bar and label as text, not an Svg', asy
   expect(await band($, 'terminal')).toEqual({ svg: 0, title: 1, label: 1 })
 })
 
-test('desktop: the row is still one Svg', async ($, on) => {
+test('desktop: the row is kit text with the ring, track and crab as Svg', async ($, on) => {
   await session($, on)
-  expect(await band($, 'desktop')).toEqual({ svg: 1, title: 0, label: 0 })
+  const drawn = await band($, 'desktop')
+  expect(drawn.svg).toBeGreaterThanOrEqual(3)
+  expect({ title: drawn.title, label: drawn.label }).toEqual({ title: 1, label: 1 })
 })

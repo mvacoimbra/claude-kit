@@ -30,7 +30,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
     // Two planned tasks, none started: the crew button counts both.
-    expect((await ui.find({ key: 'savvy-agents' }))?.props.label).toBe('×2')
+    expect((await ui.find({ key: 'savvy-agents' }))?.props.label).toBe('Agents · 2')
 
     await $.tool.call({ tool: PROGRESS, done: 1 } as never)
     expect(opened).toEqual(['savvy-agents'])
@@ -49,10 +49,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(reported).toMatchObject({ result: 'ok: Tasks 0/200' })
 
     const bar = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
-    expect((await bar.find({ key: 'savvy-agents' }))?.props.label).toBe('×200')
+    expect((await bar.find({ key: 'savvy-agents' }))?.props.label).toBe('Agents · 200')
 
     const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'Pane', requestId: 'savvy-agents', props: pane })
-    expect(await ui.find({ text: /Planned · 200/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Planned$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^200$/ })).toBeDefined()
     const drawn = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('')
     expect(drawn).not.toContain('native code')
     expect(drawn).not.toContain('[object')
