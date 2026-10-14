@@ -140,10 +140,11 @@ test('hub: act open opens the agents pane', { plugins: [HUB] }, async ($, on) =>
   expect(opened).toEqual(['savvy-agents'])
 })
 
-test('hub: a setting is changed through its config row', { plugins: [HUB] }, async ($, on) => {
-  const writes: [string, unknown][] = []
+test('hub: a press stores a setting in the user store, and the tab shows it', { plugins: [HUB] }, async ($, on) => {
+  const store = sharedStore(on)
+  const configWrites: string[] = []
   on('config.set', async (_$, e) => {
-    writes.push([e.key, e.value])
+    configWrites.push(e.key)
     return { value: e.value }
   })
   await start($, on)
@@ -152,7 +153,35 @@ test('hub: a setting is changed through its config row', { plugins: [HUB] }, asy
   expect(await hub.act($, { id: 'autoOpen', value: 'any' })).toEqual({ message: 'Abrir o painel sozinho: Qualquer subagente.' })
   expect(await hub.act($, { id: 'language', value: 'xx' })).toEqual({ message: 'Opção inválida: xx' })
   expect(await hub.act($, { id: 'nope' })).toEqual({ message: 'Ação desconhecida: nope' })
-  expect(writes).toEqual([['savvy-progress.autoOpen', 'any']])
+  expect(store.get('autoOpen')).toBe('any')
+  expect(store.has('language')).toBe(false)
+  // Claude Code's config lists no plugin rows: nothing is written there.
+  expect(configWrites).toEqual([])
+  const settings = items(await hub.panel($, { lang: 'en', ...ARGS }), 'settings')
+  expect(settings.map(i => (i.kind === 'choice' ? [i.id, i.value, i.scope] : i.kind))).toEqual([
+    ['language', 'auto', 'user'],
+    ['autoOpen', 'any', 'user'],
+  ])
+})
+
+test('hub: a setting another session stored shows here, in the panel and the pane language', { plugins: [HUB] }, async ($, on) => {
+  const store = sharedStore(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', async () => ({ agentId: 'a1', model: 'claude-opus-5-5' }) as never)
+  const clock = await start($, on)
+  await $.agent.spawn({ prompt: 'go', description: 'Write the parser', subagentType: 'savvy-careful', tool_use_id: 't1' } as never)
+
+  store.set('autoOpen', 'any')
+  const choice = (p: SavvyPanel, id: string) => items(p, 'settings').find(i => i.kind === 'choice' && i.id === id)
+  expect(choice(await hub.panel($, { lang: 'en', ...ARGS }), 'autoOpen')).toMatchObject({ value: 'any' })
+
+  // On the slow clock alone, the pane follows a language another session picked.
+  store.set('language', 'ru')
+  await clock.advance(3000)
+  const pane = { title: '', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
+  const ui = await $.ui.mount({ plugin: 'savvy-progress', surface: 'terminal', component: 'Pane', requestId: 'savvy-agents', props: pane })
+  expect(await ui.find({ type: 'Text', text: /^Работают$/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('hub: the agents-info command is gone', { plugins: [HUB] }, async ($, on) => {
@@ -205,4 +234,12 @@ test('hub: a choice another session stored shows here, in the panel and on the s
   const ui = await $.ui.mount({ plugin: 'savvy-progress', surface: 'terminal', component: 'Pane', requestId: 'savvy-agents', props: pane })
   expect((await ui.find({ key: 'compact' }))?.props.label).toBe('Expand')
   await ui.unmount()
+})
+
+test('settings: with nothing stored and no userConfig, the defaults stand', { plugins: [HUB] }, async ($, on) => {
+  sharedStore(on)
+  await start($, on)
+  // `register` got no options in the test: the defaults stand, and the panel says so.
+  const p = await hub.panel($, { lang: 'en', ...ARGS })
+  expect(items(p, 'settings').map(i => (i.kind === 'choice' ? i.value : ''))).toEqual(['auto', 'savvy'])
 })

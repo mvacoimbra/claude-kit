@@ -18,7 +18,7 @@ The mod has no slash command of its own: it is a tab in the `/mods` panel of the
 The line under the mod's name in `/mods` is short (`2/6 · 3 running`), with the flow's progress as a ring beside it.
 - **Settings**: the two options below, `language` and `autoOpen`, changed in place.
 
-Settings follow you: the two options live in their config rows and the view choices in the mod's store, both shared by every session, and each session reads them again every few seconds. What runs in a session (its flow and its agents) stays that session's.
+Settings follow you: the two options and the view choices live in the mod's store, shared by every session, and each session reads them again every few seconds. Until one is chosen in `/mods`, an option takes its `/config` value, else its default. What runs in a session (its flow and its agents) stays that session's.
 
 Every component the mod draws (the band in each state, the agents pane, its rows, buttons and crabs) also shows, named and live, in the **Components** tab of `/mods`.
 
@@ -37,6 +37,6 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 { "pluginConfigs": { "savvy-progress": { "options": { "language": "ru" } } } }
 ```
 
-`autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. Either way it can be opened from `/mods`, and the Agents button on the progress bar toggles it. Both settings can also be changed in the Agents tab of `/mods`.
+`autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. Either way it can be opened from `/mods`, and the Agents button on the progress bar toggles it. Both settings can also be changed in the Agents tab of `/mods`; a choice made there is kept in the mod's store and wins over `/config`, for every session.
 
 Install instructions are in the [repository README](../../README.md).

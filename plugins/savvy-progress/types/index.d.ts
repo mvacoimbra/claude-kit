@@ -49,7 +49,7 @@ export type Panel = {
   autoOpenedFor: string
 }
 
-/** The two userConfig settings, as last read from their config rows. */
+/** The two settings, as last read from the user's store (else userConfig, else the default). */
 export type Prefs = {
   language: string
   autoOpen: string

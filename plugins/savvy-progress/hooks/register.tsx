@@ -31,7 +31,7 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   isDoneCollapsed: false,
   autoOpenedFor: '',
 })
-// The two userConfig settings as last read from their config rows; null before the first read.
+// The two settings as last read from the user's store; null before the first read.
 const prefs = atom({ plugin: 'savvy-progress', key: 'prefs' } as const, null)
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
 
@@ -1017,12 +1017,13 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Settings. The two userConfig settings live in their config rows and the pane's two view
-// choices in the store: both are the user's, shared by every session. The atoms only carry
-// them between draws of one session, so they are read again before each /mods panel and
-// on a slow clock, and another session's change shows here within seconds.
+// Settings. Every setting is the user's, kept in the mod's store, which every session
+// shares (Claude Code's config menu lists no plugin userConfig rows, so `$.config` cannot
+// hold them). The atoms only carry them between draws of one session, so they are read again
+// before each /mods panel and on a slow clock, and another session's change shows here
+// within seconds.
 
-// The mod's userConfig fields the hub's Settings section changes, each a choice.
+// The two settings the hub's Settings section changes, each a choice, stored under its own key.
 const SETTINGS = {
   language: { values: ['auto', 'en', 'ru', 'he'], fallback: 'auto' },
   autoOpen: { values: ['savvy', 'any'], fallback: 'savvy' },
@@ -1032,30 +1033,30 @@ type Setting = keyof typeof SETTINGS
 
 const isSetting = (id: string): id is Setting => Object.hasOwn(SETTINGS, id)
 
-type ConfigRow = { key: string; value?: unknown }
+const isKnown = (id: Setting, v: unknown): v is string => typeof v === 'string' && (SETTINGS[id].values as readonly string[]).includes(v)
 
-async function configRows($: EngineInterface): Promise<readonly ConfigRow[]> {
+// The effective setting: the stored value, else the userConfig value `register` got, else
+// the default.
+const settingFrom = (stored: unknown, options: PluginOptions, id: Setting): string =>
+  isKnown(id, stored) ? stored : isKnown(id, options[id]) ? options[id] : SETTINGS[id].fallback
+
+async function storedSetting($: EngineInterface, id: Setting): Promise<unknown> {
   try {
-    return (await $.config.list()) as readonly ConfigRow[]
+    return await $.store.get(id)
   } catch {
-    // No config menu here: the activation's options stand.
-    return []
+    // No store here: the activation's options stand.
+    return undefined
   }
 }
 
-// The setting as stored now, else the options `register` got, else its default.
-const settingFrom = (rows: readonly ConfigRow[], options: PluginOptions, id: Setting): string => {
-  const { values, fallback } = SETTINGS[id]
-  const known = (v: unknown): v is string => typeof v === 'string' && (values as readonly string[]).includes(v)
-  const row = rows.find(r => r.key === `savvy-progress.${id}`)
-  if (known(row?.value)) return row.value
-  return known(options[id]) ? options[id] : fallback
-}
-
-const prefsFrom = (rows: readonly ConfigRow[], options: PluginOptions): Prefs => ({
-  language: settingFrom(rows, options, 'language'),
-  autoOpen: settingFrom(rows, options, 'autoOpen'),
+const prefsFrom = (stored: Partial<Record<Setting, unknown>>, options: PluginOptions): Prefs => ({
+  language: settingFrom(stored.language, options, 'language'),
+  autoOpen: settingFrom(stored.autoOpen, options, 'autoOpen'),
 })
+
+async function storedPrefs($: EngineInterface, options: PluginOptions): Promise<Prefs> {
+  return prefsFrom({ language: await storedSetting($, 'language'), autoOpen: await storedSetting($, 'autoOpen') }, options)
+}
 
 // The pane's view choices: the store key, the panel field it mirrors.
 const VIEW = {
@@ -1092,7 +1093,7 @@ async function setView($: EngineInterface, id: ViewChoice, on: boolean): Promise
 
 // Reads the user's settings again; an atom changes only when its stored value did.
 async function syncSettings($: EngineInterface, options: PluginOptions): Promise<void> {
-  const next = prefsFrom(await configRows($), options)
+  const next = await storedPrefs($, options)
   const was = await read($, prefs)
   if (!was || was.language !== next.language || was.autoOpen !== next.autoOpen) {
     await update($, prefs, () => next)
@@ -1242,7 +1243,7 @@ async function panelOf($: EngineInterface, args: SavvyPanelArgs, options: Plugin
   hubLang = args.lang === 'pt' ? 'pt' : 'en'
   const h = hubOf(hubLang)
   await syncSettings($, options)
-  const pr = (await read($, prefs)) ?? prefsFrom([], options)
+  const pr = (await read($, prefs)) ?? prefsFrom({}, options)
   const view = await read($, panel)
   const list = await read($, agents)
   const f = await read($, flow)
@@ -1338,11 +1339,14 @@ async function actOn($: EngineInterface, args: SavvyActArgs): Promise<SavvyActRe
   if (!isSetting(args.id)) return { message: h.unknown(args.id) }
   const value = args.value ?? ''
   if (!(SETTINGS[args.id].values as readonly string[]).includes(value)) return { message: h.badValue(value) }
-  const written = await $.config.set({ key: `savvy-progress.${args.id}`, value })
-  if (written.deny !== undefined) return { message: written.deny }
-  // The pane and the band follow at once; the reload the change brings reads it again.
+  // The store first, the user's for every session; then this session follows at once.
   const id = args.id
-  await update($, prefs, prev => ({ ...(prev ?? { language: 'auto', autoOpen: 'savvy' }), [id]: value }))
+  try {
+    await $.store.set(id, value)
+  } catch (error) {
+    return { message: error instanceof Error ? error.message : String(error) }
+  }
+  await update($, prefs, prev => ({ ...(prev ?? prefsFrom({}, {})), [id]: value }))
   if (id === 'language') lang = await detectLang($, value)
   return { message: h.set(settingLabel(h, id), optionLabel(h, value)) }
 }
@@ -1806,7 +1810,7 @@ export const register: Register = (on, options) => {
     if (e.subagentType.startsWith('savvy-')) {
       const f = await read($, flow)
       await autoOpen($, f && !f.isFinished ? f.title : 'savvy-flow')
-    } else if (((await read($, prefs)) ?? prefsFrom([], options)).autoOpen === 'any') {
+    } else if (((await read($, prefs)) ?? (await storedPrefs($, options))).autoOpen === 'any') {
       await autoOpen($, 'any-agent')
     }
     return started
